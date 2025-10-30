@@ -1,4 +1,18 @@
 ################################################################################
+# MUST RUN THIS BLOCK SEPARATELY TO SET CURRENT DIRECTORY
+library(rstudioapi)
+
+if (rstudioapi::isAvailable()) {
+  # Get the directory of the currently active script
+  script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+  print(script_dir)
+} else {
+  stop("rstudioapi is not available. Make sure you're running this in RStudio.")
+}
+setwd(script_dir)
+################################################################################
+
+################################################################################
 # Inverse Probability Weighting for Multiple Groups (Trial Membership)
 # Simulation Study for IPD Meta-Analysis
 # R Implementation

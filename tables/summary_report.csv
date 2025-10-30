@@ -1,0 +1,10 @@
+"Metric","Value"
+"Original Sample Size",1500
+"Effective Sample Size (Stabilized)",712
+"ESS Retention (%)",47.5
+"Max Pre-Weight |SMD|",0.676
+"Max Post-Weight |SMD|",0.22
+"Comparisons |SMD| > 0.1 (Pre)",9
+"Comparisons |SMD| > 0.1 (Post)",3
+"Unweighted HR",0.686
+"Weighted HR",0.859
