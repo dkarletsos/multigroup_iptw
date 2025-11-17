@@ -2,6 +2,8 @@
 # MUST RUN THIS BLOCK SEPARATELY TO SET CURRENT DIRECTORY
 library(rstudioapi)
 
+
+
 if (rstudioapi::isAvailable()) {
   # Get the directory of the currently active script
   script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
