@@ -1,7 +1,12 @@
-################################################################################
-# MUST RUN THIS BLOCK SEPARATELY TO SET CURRENT DIRECTORY
-library(rstudioapi)
+############################################################################
+# Inverse Probability Weighting for Multiple Groups (Trial Membership)
+# Simulation Study for IPD Meta-Analysis
+# R Implementation
+############################################################################
 
+############################################################################
+### MUST RUN THIS BLOCK SEPARATELY TO SET CURRENT DIRECTORY
+library(rstudioapi)
 if (rstudioapi::isAvailable()) {
   # Get the directory of the currently active script
   script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
@@ -9,24 +14,41 @@ if (rstudioapi::isAvailable()) {
 } else {
   stop("rstudioapi is not available. Make sure you're running this in RStudio.")
 }
-setwd(script_dir)
-################################################################################
 
-################################################################################
+setwd(script_dir)
+############################################################################
+
+############################################################################
 # Inverse Probability Weighting for Multiple Groups (Trial Membership)
 # Simulation Study for IPD Meta-Analysis
 # R Implementation
-################################################################################
+############################################################################
 
 # Clear workspace
 rm(list = ls())
 
-# Set working directory (modify as needed)
-# setwd("path/to/your/directory")
+# Recreate script_dir after clearing workspace
+script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
 
-################################################################################
+# Create output directories if they don't exist
+tables_dir <- file.path(dirname(script_dir), "tables")
+figures_dir <- file.path(dirname(script_dir), "figures")
+
+# Create directories if they don't exist
+if (!dir.exists(tables_dir)) {
+  dir.create(tables_dir, recursive = TRUE)
+}
+if (!dir.exists(figures_dir)) {
+  dir.create(figures_dir, recursive = TRUE)
+}
+
+cat("Output directories:\n")
+cat("  Tables:", tables_dir, "\n")
+cat("  Figures:", figures_dir, "\n\n")
+
+############################################################################
 # INSTALL AND LOAD REQUIRED PACKAGES
-################################################################################
+############################################################################
 
 # Function to install packages if not already installed
 install_if_missing <- function(packages) {
@@ -39,9 +61,8 @@ install_if_missing <- function(packages) {
 }
 
 # Required packages
-required_packages <- c("nnet", "survival", "ggplot2", "dplyr", "tidyr", 
-                       "gridExtra", "scales", "tableone")
-
+required_packages <- c("nnet", "survival", "ggplot2", "dplyr", "tidyr",
+                        "gridExtra", "scales", "tableone")
 install_if_missing(required_packages)
 
 # Set seed for reproducibility
@@ -52,9 +73,9 @@ cat("===========================================================================
 cat("IPTW FOR MULTIPLE GROUPS SIMULATION - R IMPLEMENTATION\n")
 cat("================================================================================\n\n")
 
-################################################################################
+############################################################################
 # PART 1: DATA GENERATION FUNCTION
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 1: GENERATING IPD DATA WITH HETEROGENEOUS TRIALS\n")
@@ -112,10 +133,10 @@ generate_ipd_data <- function(n_trials = 5, n_per_trial = 300) {
     # Generate survival outcomes
     # log(hazard) depends on baseline covariates
     linear_predictor <- -3.5 + 
-                       0.03 * (age - 60) +           # Age effect (centered)
-                       0.02 * (severity - 50) +      # Severity effect (centered)
-                       0.15 * comorbidities +        # Comorbidity effect
-                       -0.2 * female                 # Female protective effect
+                        0.03 * (age - 60) +           # Age effect (centered)
+                        0.02 * (severity - 50) +      # Severity effect (centered)
+                        0.15 * comorbidities +        # Comorbidity effect
+                        -0.2 * female                 # Female protective effect
     
     # Generate survival times from Weibull distribution
     shape <- 1.2  # Weibull shape parameter
@@ -156,89 +177,107 @@ ipd_data <- generate_ipd_data(n_trials = 5, n_per_trial = 300)
 cat("IPD Data Generated\n")
 cat("Total sample size:", nrow(ipd_data), "\n")
 cat("Number of trials:", length(unique(ipd_data$trial_id)), "\n\n")
-
 cat("Sample size per trial:\n")
 print(table(ipd_data$trial_id))
 cat("\n")
 
-################################################################################
+############################################################################
 # PART 2: ASSESS PRE-WEIGHTING BALANCE
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 2: PRE-WEIGHTING BALANCE ASSESSMENT\n")
 cat("================================================================================\n\n")
 
-# Function to calculate standardized mean difference (SMD)
+# Function to calculate pairwise standardized mean difference (SMD)
 calculate_smd <- function(data, var, group_var) {
-  #' Calculate SMD comparing each group to overall mean
-  #' 
-  #' @param data Data frame
-  #' @param var Variable name to calculate SMD for
-  #' @param group_var Grouping variable name
-  #' @return Data frame with SMDs by group
+  trials <- unique(data[[group_var]])
+  pairwise_smds <- data.frame()
   
-  overall_mean <- mean(data[[var]], na.rm = TRUE)
-  overall_sd <- sd(data[[var]], na.rm = TRUE)
+  for (i in 1:(length(trials)-1)) {
+    for (j in (i+1):length(trials)) {
+      trial1_data <- data[data[[group_var]] == trials[i], var]
+      trial2_data <- data[data[[group_var]] == trials[j], var]
+      
+      mean1 <- mean(trial1_data, na.rm = TRUE)
+      mean2 <- mean(trial2_data, na.rm = TRUE)
+      sd1 <- sd(trial1_data, na.rm = TRUE)
+      sd2 <- sd(trial2_data, na.rm = TRUE)
+      
+      pooled_sd <- sqrt((sd1^2 + sd2^2) / 2)
+      smd <- (mean1 - mean2) / pooled_sd
+      
+      pairwise_smds <- rbind(pairwise_smds, 
+                             data.frame(trial1 = as.character(trials[i]), 
+                                       trial2 = as.character(trials[j]), 
+                                       smd = smd,
+                                       stringsAsFactors = FALSE))
+    }
+  }
   
-  smds <- data %>%
-    group_by(across(all_of(group_var))) %>%
-    summarise(
-      group_mean = mean(.data[[var]], na.rm = TRUE),
-      smd = (group_mean - overall_mean) / overall_sd,
-      .groups = 'drop'
-    )
-  
-  return(smds)
+  return(pairwise_smds)
 }
 
-# Function to calculate weighted SMD
+# Function to calculate weighted pairwise SMD
 calculate_weighted_smd <- function(data, var, group_var, weight_var) {
-  #' Calculate weighted SMD comparing each group to weighted overall mean
-  #' 
-  #' @param data Data frame
-  #' @param var Variable name to calculate SMD for
-  #' @param group_var Grouping variable name
-  #' @param weight_var Weight variable name
-  #' @return Data frame with weighted SMDs by group
+  trials <- unique(data[[group_var]])
+  pairwise_smds <- data.frame()
   
-  # Weighted overall mean
-  overall_mean <- weighted.mean(data[[var]], data[[weight_var]], na.rm = TRUE)
+  for (i in 1:(length(trials)-1)) {
+    for (j in (i+1):length(trials)) {
+      # Filter data for each trial
+      trial1_data <- data[data[[group_var]] == trials[i], ]
+      trial2_data <- data[data[[group_var]] == trials[j], ]
+      
+      # Calculate weighted means
+      mean1 <- weighted.mean(trial1_data[[var]], trial1_data[[weight_var]], na.rm = TRUE)
+      mean2 <- weighted.mean(trial2_data[[var]], trial2_data[[weight_var]], na.rm = TRUE)
+      
+      # Calculate weighted SDs
+      weighted_var1 <- sum(trial1_data[[weight_var]] * 
+                          (trial1_data[[var]] - mean1)^2, na.rm = TRUE) / 
+                       sum(trial1_data[[weight_var]])
+      sd1 <- sqrt(weighted_var1)
+      
+      weighted_var2 <- sum(trial2_data[[weight_var]] * 
+                          (trial2_data[[var]] - mean2)^2, na.rm = TRUE) / 
+                       sum(trial2_data[[weight_var]])
+      sd2 <- sqrt(weighted_var2)
+      
+      # Calculate pooled SD
+      pooled_sd <- sqrt((sd1^2 + sd2^2) / 2)
+      
+      # Calculate SMD
+      smd <- (mean1 - mean2) / pooled_sd
+      
+      pairwise_smds <- rbind(pairwise_smds, 
+                             data.frame(trial1 = as.character(trials[i]), 
+                                       trial2 = as.character(trials[j]), 
+                                       smd = smd,
+                                       stringsAsFactors = FALSE))
+    }
+  }
   
-  # Weighted overall SD
-  weighted_var <- sum(data[[weight_var]] * (data[[var]] - overall_mean)^2, 
-                      na.rm = TRUE) / sum(data[[weight_var]])
-  overall_sd <- sqrt(weighted_var)
-  
-  smds <- data %>%
-    group_by(across(all_of(group_var))) %>%
-    summarise(
-      weighted_mean = weighted.mean(.data[[var]], .data[[weight_var]], na.rm = TRUE),
-      smd = (weighted_mean - overall_mean) / overall_sd,
-      .groups = 'drop'
-    )
-  
-  return(smds)
+  return(pairwise_smds)
 }
 
 # Calculate pre-weighting SMDs
 vars_to_check <- c("age", "female", "severity", "comorbidities")
 
 cat("PRE-WEIGHTING STANDARDIZED MEAN DIFFERENCES:\n\n")
-
 pre_weight_smds <- list()
+
 for (var in vars_to_check) {
   smd_results <- calculate_smd(ipd_data, var, "trial_id")
   pre_weight_smds[[var]] <- smd_results
   
   cat(paste0("Variable: ", toupper(var), "\n"))
-  print(smd_results, n = Inf)
+  print(smd_results, row.names = FALSE)
   cat(paste0("Max absolute SMD: ", round(max(abs(smd_results$smd)), 3), "\n\n"))
 }
 
 # Summary statistics by trial
 cat("BASELINE CHARACTERISTICS BY TRIAL (UNWEIGHTED):\n\n")
-
 baseline_summary <- ipd_data %>%
   group_by(trial_id) %>%
   summarise(
@@ -254,13 +293,12 @@ baseline_summary <- ipd_data %>%
     Event_rate = round(100 * mean(event), 1),
     .groups = 'drop'
   )
-
-print(baseline_summary, n = Inf)
+print(baseline_summary, row.names = FALSE)
 cat("\n")
 
-################################################################################
+############################################################################
 # PART 3: ESTIMATE PROPENSITY SCORES (TRIAL MEMBERSHIP)
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 3: ESTIMATING TRIAL MEMBERSHIP PROPENSITY SCORES\n")
@@ -270,15 +308,12 @@ cat("===========================================================================
 # Outcome: trial membership (trial_id)
 # Predictors: baseline covariates
 cat("Fitting multinomial logistic regression model...\n")
-
 ps_model <- multinom(
   trial_id ~ age + female + severity + comorbidities, 
   data = ipd_data, 
-  trace = FALSE
-)
+  trace = FALSE)
 
 cat("Multinomial logistic regression model fitted.\n\n")
-
 cat("Model summary:\n")
 print(summary(ps_model))
 cat("\n")
@@ -312,12 +347,12 @@ ps_by_trial <- ipd_data %>%
     Max_PS = round(max(ps), 3),
     .groups = 'drop'
   )
-print(ps_by_trial, n = Inf)
+print(ps_by_trial, row.names = FALSE)
 cat("\n")
 
-################################################################################
+############################################################################
 # PART 4: CALCULATE STABILIZED IPTW WEIGHTS
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 4: CALCULATING STABILIZED IPTW WEIGHTS\n")
@@ -362,7 +397,7 @@ sw_by_trial <- ipd_data %>%
     SD_SW = round(sd(sw), 3),
     .groups = 'drop'
   )
-print(sw_by_trial, n = Inf)
+print(sw_by_trial, row.names = FALSE)
 cat("\n")
 
 # Calculate effective sample size
@@ -376,39 +411,41 @@ cat("Effective sample size (stabilized weights):", round(ess_stabilized, 0),
 cat("Effective sample size (unstabilized weights):", round(ess_unstabilized, 0), 
     "(", round(100 * ess_unstabilized / nrow(ipd_data), 1), "%)\n\n")
 
-################################################################################
+############################################################################
 # PART 5: ASSESS POST-WEIGHTING BALANCE
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 5: POST-WEIGHTING BALANCE ASSESSMENT\n")
 cat("================================================================================\n\n")
 
 cat("POST-WEIGHTING STANDARDIZED MEAN DIFFERENCES:\n\n")
-
 post_weight_smds <- list()
+
 for (var in vars_to_check) {
   smd_results <- calculate_weighted_smd(ipd_data, var, "trial_id", "sw")
   post_weight_smds[[var]] <- smd_results
   
   cat(paste0("Variable: ", toupper(var), "\n"))
-  print(smd_results, n = Inf)
+  print(smd_results, row.names = FALSE)
   cat(paste0("Max absolute SMD: ", round(max(abs(smd_results$smd)), 3), "\n\n"))
 }
 
 # Create comparison table
 cat("SMD COMPARISON: PRE vs POST WEIGHTING:\n\n")
-
 smd_comparison <- data.frame()
+
 for (var in vars_to_check) {
   pre <- pre_weight_smds[[var]]
   post <- post_weight_smds[[var]]
   
   for (i in 1:nrow(pre)) {
-    improvement <- ifelse(abs(post$smd[i]) < abs(pre$smd[i]), "Improved", "No change")
+    improvement <- ifelse(abs(post$smd[i]) < abs(pre$smd[i]), "Improved", 
+                         ifelse(abs(post$smd[i]) == abs(pre$smd[i]), "No change", "Worse"))
+    
     smd_comparison <- rbind(smd_comparison, data.frame(
       Variable = var,
-      Trial = as.character(pre$trial_id[i]),
+      Comparison = paste0(pre$trial1[i], " vs ", pre$trial2[i]),
       SMD_Unweighted = round(pre$smd[i], 3),
       SMD_Weighted = round(post$smd[i], 3),
       Improvement = improvement,
@@ -430,9 +467,9 @@ cat("Number of comparisons with |SMD| > 0.1 before weighting:", n_pre_imbalanced
 cat("Number of comparisons with |SMD| > 0.1 after weighting:", n_post_imbalanced, "\n")
 cat("Proportion of comparisons improved:", round(pct_improved, 1), "%\n\n")
 
-################################################################################
+############################################################################
 # PART 6: VISUALIZATIONS
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 6: CREATING VISUALIZATIONS\n")
@@ -444,14 +481,14 @@ love_plot_data <- smd_comparison %>%
                names_to = "Weighting",
                values_to = "SMD") %>%
   mutate(
-    Weighting = factor(Weighting, 
+    Weighting = factor(Weighting,
                       levels = c("SMD_Unweighted", "SMD_Weighted"),
                       labels = c("Unweighted", "Weighted")),
-    Variable_Trial = paste0(Variable, " (Trial ", Trial, ")")
+    Variable_Comparison = paste0(Variable, " (", Comparison, ")")
   )
 
 # Create love plot
-p1 <- ggplot(love_plot_data, aes(x = abs(SMD), y = Variable_Trial, 
+p1 <- ggplot(love_plot_data, aes(x = abs(SMD), y = Variable_Comparison,
                                   color = Weighting, shape = Weighting)) +
   geom_point(size = 3) +
   geom_vline(xintercept = 0.1, linetype = "dashed", color = "red", alpha = 0.6) +
@@ -459,21 +496,22 @@ p1 <- ggplot(love_plot_data, aes(x = abs(SMD), y = Variable_Trial,
   scale_shape_manual(values = c("Unweighted" = 16, "Weighted" = 17)) +
   labs(
     title = "Covariate Balance Before and After IPTW",
-    subtitle = "Standardized Mean Differences by Trial",
+    subtitle = "Pairwise Standardized Mean Differences",
     x = "Absolute Standardized Mean Difference",
     y = "",
     color = "",
     shape = ""
   ) +
-  theme_minimal() +
+  theme_bw() +
   theme(
     legend.position = "bottom",
     plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
-    plot.subtitle = element_text(hjust = 0.5, size = 11)
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    axis.text.y = element_text(size = 8)
   )
 
-ggsave("love_plot.png", p1, width = 10, height = 8, dpi = 300)
-cat("Love plot saved: love_plot.png\n")
+ggsave(file.path(figures_dir, "love_plot.png"), p1, width = 10, height = 10, dpi = 300)
+cat("Love plot saved:", file.path(figures_dir, "love_plot.png"), "\n")
 
 # Weight distribution plot
 p2 <- ggplot(ipd_data, aes(x = sw)) +
@@ -484,13 +522,13 @@ p2 <- ggplot(ipd_data, aes(x = sw)) +
     x = "Stabilized Weight",
     y = "Frequency"
   ) +
-  theme_minimal() +
+  theme_bw() +
   theme(
     plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
   )
 
-ggsave("weight_distribution.png", p2, width = 8, height = 6, dpi = 300)
-cat("Weight distribution plot saved: weight_distribution.png\n")
+ggsave(file.path(figures_dir, "weight_distribution.png"), p2, width = 8, height = 6, dpi = 300)
+cat("Weight distribution plot saved:", file.path(figures_dir, "weight_distribution.png"), "\n")
 
 # Propensity score distribution by trial
 p3 <- ggplot(ipd_data, aes(x = ps, fill = trial_id)) +
@@ -502,18 +540,18 @@ p3 <- ggplot(ipd_data, aes(x = ps, fill = trial_id)) +
     y = "Density",
     fill = "Trial"
   ) +
-  theme_minimal() +
+  theme_bw() +
   theme(
     legend.position = "bottom",
     plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
   )
 
-ggsave("propensity_score_distribution.png", p3, width = 10, height = 6, dpi = 300)
-cat("Propensity score distribution plot saved: propensity_score_distribution.png\n\n")
+ggsave(file.path(figures_dir, "propensity_score_distribution.png"), p3, width = 10, height = 6, dpi = 300)
+cat("Propensity score distribution plot saved:", file.path(figures_dir, "propensity_score_distribution.png"), "\n\n")
 
-################################################################################
+############################################################################
 # PART 7: SURVIVAL ANALYSIS (DEMONSTRATION)
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 7: SURVIVAL ANALYSIS DEMONSTRATION\n")
@@ -528,25 +566,25 @@ treatment_effect <- log(0.70)
 ipd_data$time_modified <- ifelse(
   ipd_data$treatment == 1,
   ipd_data$time * exp(-treatment_effect),
-  ipd_data$time
-)
+  ipd_data$time)
+
 ipd_data$event_modified <- ifelse(
   ipd_data$treatment == 1 & ipd_data$time_modified > 5,
   0, 
-  ipd_data$event
-)
+  ipd_data$event)
+
 ipd_data$time_modified <- pmin(ipd_data$time_modified, 5)
 
 # Unweighted Cox model
 cat("UNWEIGHTED ANALYSIS:\n")
-cox_unweighted <- coxph(Surv(time_modified, event_modified) ~ treatment, 
+cox_unweighted <- coxph(Surv(time_modified, event_modified) ~ treatment,
                         data = ipd_data)
 print(summary(cox_unweighted))
 cat("\n")
 
 # Weighted Cox model (using stabilized weights)
 cat("WEIGHTED ANALYSIS (Stabilized IPTW):\n")
-cox_weighted <- coxph(Surv(time_modified, event_modified) ~ treatment, 
+cox_weighted <- coxph(Surv(time_modified, event_modified) ~ treatment,
                       data = ipd_data,
                       weights = sw,
                       robust = TRUE)
@@ -565,26 +603,27 @@ cat("Unweighted HR:", round(hr_unweighted, 3),
 cat("Weighted HR:", round(hr_weighted, 3), 
     "95% CI: (", round(ci_weighted[1], 3), "-", round(ci_weighted[2], 3), ")\n\n")
 
-################################################################################
+############################################################################
 # PART 8: SAVE RESULTS
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("PART 8: SAVING RESULTS\n")
 cat("================================================================================\n\n")
 
 # Save processed dataset
-write.csv(ipd_data, "ipd_data_with_weights.csv", row.names = FALSE)
-cat("IPD data with weights saved: ipd_data_with_weights.csv\n")
+write.csv(ipd_data, file.path(tables_dir, "ipd_data_with_weights.csv"), row.names = FALSE)
+cat("IPD data with weights saved:", file.path(tables_dir, "ipd_data_with_weights.csv"), "\n")
 
 # Save SMD comparison table
-write.csv(smd_comparison, "smd_comparison.csv", row.names = FALSE)
-cat("SMD comparison table saved: smd_comparison.csv\n")
+write.csv(smd_comparison, file.path(tables_dir, "smd_comparison.csv"), row.names = FALSE)
+cat("SMD comparison table saved:", file.path(tables_dir, "smd_comparison.csv"), "\n")
 
 # Save baseline characteristics table
-write.csv(baseline_summary, "baseline_characteristics.csv", row.names = FALSE)
-cat("Baseline characteristics table saved: baseline_characteristics.csv\n")
+write.csv(baseline_summary, file.path(tables_dir, "baseline_characteristics.csv"), row.names = FALSE)
+cat("Baseline characteristics table saved:", file.path(tables_dir, "baseline_characteristics.csv"), "\n")
 
+# Create summary report
 # Create summary report
 summary_report <- data.frame(
   Metric = c(
@@ -608,25 +647,26 @@ summary_report <- data.frame(
     n_post_imbalanced,
     round(hr_unweighted, 3),
     round(hr_weighted, 3)
-  )
-)
+  ))
 
-write.csv(summary_report, "summary_report.csv", row.names = FALSE)
-cat("Summary report saved: summary_report.csv\n\n")
+write.csv(summary_report, file.path(tables_dir, "summary_report.csv"), row.names = FALSE)
+cat("Summary report saved:", file.path(tables_dir, "summary_report.csv"), "\n\n")
 
-################################################################################
+############################################################################
 # FINAL SUMMARY
-################################################################################
+############################################################################
 
 cat("================================================================================\n")
 cat("SIMULATION COMPLETE!\n")
 cat("================================================================================\n\n")
 
 cat("All results have been saved:\n")
+cat("Tables saved to:", tables_dir, "\n")
 cat("  - ipd_data_with_weights.csv\n")
 cat("  - smd_comparison.csv\n")
 cat("  - baseline_characteristics.csv\n")
-cat("  - summary_report.csv\n")
+cat("  - summary_report.csv\n\n")
+cat("Figures saved to:", figures_dir, "\n")
 cat("  - love_plot.png\n")
 cat("  - weight_distribution.png\n")
 cat("  - propensity_score_distribution.png\n\n")
