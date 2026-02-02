@@ -290,7 +290,10 @@ cat("===========================================================================
 #'   - age: 30-60 years
 #'   - female: binary
 #'   - europe: binary (region indicator)
-#'   - pack_years: cumulative smoking exposure
+#'   - # pack_years: Cumulative pack-years at INDEX DATE
+#'     - THS Users: pack-years at date of switching (≥2 years ago)
+#'     - Former Smokers: pack-years at date of quitting (≥2 years ago)
+#'     - Current Smokers: pack-years at study enrollment (no switching/quitting event)
 #'   - cpd_history: cigarettes per day (historical)
 #' 
 #' Outcomes (9 biomarkers of potential harm):
