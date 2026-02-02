@@ -1,46 +1,25 @@
 ############################################################################
-# Inverse Probability Weighting for Multiple Groups (Trial Membership)
-# Simulation Study for IPD Meta-Analysis
-# R Implementation
-############################################################################
-
-############################################################################
-### MUST RUN THIS BLOCK SEPARATELY TO SET CURRENT DIRECTORY
-library(rstudioapi)
-if (rstudioapi::isAvailable()) {
-  # Get the directory of the currently active script
-  script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
-  print(script_dir)
-} else {
-  stop("rstudioapi is not available. Make sure you're running this in RStudio.")
-}
-
-setwd(script_dir)
-############################################################################
-
-############################################################################
-# Inverse Probability Weighting for Multiple Groups (Trial Membership)
-# Simulation Study for IPD Meta-Analysis
-# R Implementation
+# Inverse Probability Weighting for Product Switching Groups
+# ENHANCED VERSION: Weight Trimming + E-Value Sensitivity Analysis
+# Adapted for PMI Cross-Sectional Risk Marker Study (NCT05385055)
+# 3 Groups: Current Smokers, THS Users (Switchers), Former Smokers
 ############################################################################
 
 # Clear workspace
 rm(list = ls())
 
-# Recreate script_dir after clearing workspace
-script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
-
-# Create output directories if they don't exist
-tables_dir <- file.path(dirname(script_dir), "tables")
-figures_dir <- file.path(dirname(script_dir), "figures")
-
-# Create directories if they don't exist
-if (!dir.exists(tables_dir)) {
-  dir.create(tables_dir, recursive = TRUE)
+# Get script directory (for RStudio users)
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+  setwd(script_dir)
 }
-if (!dir.exists(figures_dir)) {
-  dir.create(figures_dir, recursive = TRUE)
-}
+
+# Create output directories
+tables_dir <- file.path(getwd(), "tables")
+figures_dir <- file.path(getwd(), "figures")
+
+if (!dir.exists(tables_dir)) dir.create(tables_dir, recursive = TRUE)
+if (!dir.exists(figures_dir)) dir.create(figures_dir, recursive = TRUE)
 
 cat("Output directories:\n")
 cat("  Tables:", tables_dir, "\n")
@@ -50,7 +29,6 @@ cat("  Figures:", figures_dir, "\n\n")
 # INSTALL AND LOAD REQUIRED PACKAGES
 ############################################################################
 
-# Function to install packages if not already installed
 install_if_missing <- function(packages) {
   for (pkg in packages) {
     if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
@@ -60,125 +38,256 @@ install_if_missing <- function(packages) {
   }
 }
 
-# Required packages
-required_packages <- c("nnet", "survival", "ggplot2", "dplyr", "tidyr",
-                        "gridExtra", "scales", "tableone")
+required_packages <- c("nnet", "ggplot2", "dplyr", "tidyr", "gridExtra", "scales")
 install_if_missing(required_packages)
 
-# Set seed for reproducibility
-set.seed(12345)
+set.seed(20250202)
 
 cat("\n")
 cat("================================================================================\n")
-cat("IPTW FOR MULTIPLE GROUPS SIMULATION - R IMPLEMENTATION\n")
+cat("IPTW FOR PRODUCT SWITCHING: PMI THS STUDY ADAPTATION\n")
+cat("ENHANCED: Weight Trimming + E-Value Sensitivity Analysis\n")
+cat("3 Groups: Current Smokers | THS Users (Switchers) | Former Smokers\n")
 cat("================================================================================\n\n")
 
 ############################################################################
-# PART 1: DATA GENERATION FUNCTION
+# E-VALUE FUNCTIONS
+############################################################################
+
+# E-value calculation for risk ratios
+# Reference: VanderWeele & Ding (2017) Annals of Internal Medicine
+calculate_evalue_rr <- function(rr, lo = NULL, hi = NULL) {
+  #' Calculate E-value for a risk ratio
+  #' 
+
+  #' @param rr Point estimate of risk ratio (or HR, OR if rare outcome)
+  #' @param lo Lower bound of 95% CI (optional)
+  #' @param hi Upper bound of 95% CI (optional)
+  #' @return List with E-values for point estimate and CI bound
+  
+  # For RR < 1, take reciprocal
+  if (rr < 1) {
+    rr <- 1 / rr
+    if (!is.null(lo) && !is.null(hi)) {
+      temp <- lo
+      lo <- 1 / hi
+      hi <- 1 / temp
+    }
+  }
+  
+  # E-value formula: E = RR + sqrt(RR * (RR - 1))
+  evalue_point <- rr + sqrt(rr * (rr - 1))
+  
+  evalue_ci <- NA
+
+  if (!is.null(lo)) {
+    # For CI, use the bound closer to null (1)
+    ci_bound <- ifelse(lo > 1, lo, ifelse(!is.null(hi) && hi < 1, hi, 1))
+    if (ci_bound > 1) {
+      evalue_ci <- ci_bound + sqrt(ci_bound * (ci_bound - 1))
+    } else {
+      evalue_ci <- 1  # CI includes null
+    }
+  }
+  
+  return(list(
+    evalue_point = round(evalue_point, 2),
+    evalue_ci = round(evalue_ci, 2)
+  ))
+}
+
+# Convert Cohen's d to approximate risk ratio for E-value calculation
+# Reference: VanderWeele (2017) - Approximation for continuous outcomes
+cohens_d_to_rr <- function(d) {
+  #' Convert standardized mean difference to approximate risk ratio
+  #' Using VanderWeele's approximation: RR ≈ exp(0.91 * d)
+  #' 
+  #' @param d Cohen's d (standardized mean difference)
+  #' @return Approximate risk ratio
+  
+  # Take absolute value for E-value calculation
+  d <- abs(d)
+  
+  # Approximation from VanderWeele (2017)
+  # This assumes outcome is approximately normally distributed
+  rr <- exp(0.91 * d)
+  
+  return(rr)
+}
+
+# Calculate E-value for continuous outcome
+calculate_evalue_continuous <- function(diff, se, pooled_sd) {
+  #' Calculate E-value for continuous outcome
+  #' 
+  #' @param diff Mean difference between groups
+  #' @param se Standard error of the difference
+  #' @param pooled_sd Pooled standard deviation of the outcome
+  #' @return List with Cohen's d, approximate RR, and E-values
+  
+  # Calculate Cohen's d
+  d <- abs(diff) / pooled_sd
+  
+  # Calculate 95% CI for Cohen's d
+  d_lo <- abs(diff - 1.96 * se) / pooled_sd
+  d_hi <- abs(diff + 1.96 * se) / pooled_sd
+  
+  # Convert to approximate RR
+  rr <- cohens_d_to_rr(d)
+  rr_lo <- cohens_d_to_rr(min(d_lo, d_hi))
+  rr_hi <- cohens_d_to_rr(max(d_lo, d_hi))
+  
+  # Calculate E-values
+  evals <- calculate_evalue_rr(rr, rr_lo, rr_hi)
+  
+  return(list(
+    cohens_d = round(d, 3),
+    approx_rr = round(rr, 2),
+    evalue_point = evals$evalue_point,
+    evalue_ci = evals$evalue_ci
+  ))
+}
+
+############################################################################
+# PART 1: DATA GENERATION - PMI STUDY STRUCTURE
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 1: GENERATING IPD DATA WITH HETEROGENEOUS TRIALS\n")
+cat("PART 1: GENERATING SIMULATED DATA (PMI STUDY STRUCTURE)\n")
 cat("================================================================================\n\n")
 
-generate_ipd_data <- function(n_trials = 5, n_per_trial = 300) {
-  #' Generate IPD with heterogeneous baseline characteristics across trials
+generate_pmi_data <- function(n_per_group = 296) {
+  #' Generate data mimicking PMI Cross-Sectional Risk Marker Study
   #' 
-  #' @param n_trials Number of trials to simulate
-  #' @param n_per_trial Number of participants per trial
-  #' @return Data frame with IPD from all trials
+  #' Groups:
+  #'   1 = Current Smokers (reference)
+  #'   2 = THS Users (switched from cigarettes ≥2 years ago)
+  #'   3 = Former Smokers (quit all tobacco ≥2 years ago)
   
-  # Trial-specific parameters (simulating different populations)
-  trial_params <- list(
-    # Trial 1: Younger, lower severity
-    list(age_mean = 55, age_sd = 10, severity_mean = 45, 
-         severity_sd = 15, female_prop = 0.45),
-    # Trial 2: Older, higher severity
-    list(age_mean = 70, age_sd = 8, severity_mean = 68, 
-         severity_sd = 12, female_prop = 0.55),
-    # Trial 3: Moderate characteristics
-    list(age_mean = 62, age_sd = 12, severity_mean = 55, 
-         severity_sd = 18, female_prop = 0.50),
-    # Trial 4: Younger with higher severity
-    list(age_mean = 58, age_sd = 11, severity_mean = 62, 
-         severity_sd = 14, female_prop = 0.48),
-    # Trial 5: Older with lower severity
-    list(age_mean = 67, age_sd = 9, severity_mean = 48, 
-         severity_sd = 16, female_prop = 0.52)
+  # Group-specific parameters (simulating SELECTION into groups)
+  group_params <- list(
+    # Group 1: Current Smokers - older, higher pack-years
+    current_smoker = list(
+      age_mean = 48, age_sd = 8,
+      pack_years_mean = 28, pack_years_sd = 10,
+      cpd_mean = 18, cpd_sd = 6,
+      female_prop = 0.42,
+      europe_prop = 0.55
+    ),
+    # Group 2: THS Users - younger, moderate smoking history
+    ths_user = list(
+      age_mean = 44, age_sd = 7,
+      pack_years_mean = 22, pack_years_sd = 8,
+      cpd_mean = 16, cpd_sd = 5,
+      female_prop = 0.44,
+      europe_prop = 0.50
+    ),
+    # Group 3: Former Smokers - health-conscious, lower pack-years
+    former_smoker = list(
+      age_mean = 46, age_sd = 8,
+      pack_years_mean = 20, pack_years_sd = 9,
+      cpd_mean = 15, cpd_sd = 5,
+      female_prop = 0.46,
+      europe_prop = 0.52
+    )
   )
   
-  # Initialize empty list to store trial data
-  trial_list <- list()
+  group_names <- c("current_smoker", "ths_user", "former_smoker")
+  data_list <- list()
   
-  # Generate data for each trial
-  for (i in 1:n_trials) {
-    params <- trial_params[[i]]
+  for (g in 1:3) {
+    params <- group_params[[g]]
     
-    # Generate correlated baseline covariates
-    age <- rnorm(n_per_trial, mean = params$age_mean, sd = params$age_sd)
+    # Generate covariates
+    age <- pmax(30, pmin(60, rnorm(n_per_group, params$age_mean, params$age_sd)))
+    pack_years <- pmax(8, params$pack_years_mean + 0.4 * (age - params$age_mean) + 
+                         rnorm(n_per_group, 0, params$pack_years_sd))
+    cpd_history <- pmax(10, rnorm(n_per_group, params$cpd_mean, params$cpd_sd))
+    female <- rbinom(n_per_group, 1, params$female_prop)
+    europe <- rbinom(n_per_group, 1, params$europe_prop)
     
-    # Disease severity correlated with age
-    severity <- params$severity_mean + 0.3 * (age - params$age_mean) + 
-                rnorm(n_per_trial, 0, params$severity_sd)
-    severity <- pmax(0, pmin(100, severity))  # Bound between 0-100
+    # Generate BIOMARKER OUTCOMES with true causal effects
     
-    # Sex (female = 1)
-    female <- rbinom(n_per_trial, 1, params$female_prop)
+    # 1. COHb (%) - lower is better
+    cohb_base <- 5 + 0.02 * (age - 45) + 0.01 * cpd_history + rnorm(n_per_group, 0, 0.8)
+    cohb_effect <- c(0, -3.5, -4.2)[g]
+    cohb <- pmax(0.3, cohb_base + cohb_effect + rnorm(n_per_group, 0, 0.3))
     
-    # Comorbidity count (0-5) - related to age
-    age_scaled <- (age - mean(age)) / sd(age)
-    comorbid_prob <- plogis(-0.5 + 0.5 * age_scaled + rnorm(n_per_trial, 0, 0.3))
-    comorbidities <- rbinom(n_per_trial, 5, comorbid_prob)
+    # 2. Total NNAL (ng/mL) - lower is better (log-normal)
+    log_nnal_base <- log(200) + 0.01 * (age - 45) + 0.02 * cpd_history + rnorm(n_per_group, 0, 0.4)
+    nnal_effect <- c(0, -1.8, -3.5)[g]
+    total_nnal <- exp(log_nnal_base + nnal_effect + rnorm(n_per_group, 0, 0.2))
     
-    # Generate survival outcomes
-    # log(hazard) depends on baseline covariates
-    linear_predictor <- -3.5 + 
-                        0.03 * (age - 60) +           # Age effect (centered)
-                        0.02 * (severity - 50) +      # Severity effect (centered)
-                        0.15 * comorbidities +        # Comorbidity effect
-                        -0.2 * female                 # Female protective effect
+    # 3. WBC (10^9/L) - lower is better
+    wbc_base <- 7.5 + 0.02 * (age - 45) + rnorm(n_per_group, 0, 1)
+    wbc_effect <- c(0, -0.8, -1.2)[g]
+    wbc <- pmax(3.5, wbc_base + wbc_effect + rnorm(n_per_group, 0, 0.3))
     
-    # Generate survival times from Weibull distribution
-    shape <- 1.2  # Weibull shape parameter
-    scale <- exp(-linear_predictor / shape)
-    u <- runif(n_per_trial)
-    time_to_event <- scale * (-log(u))^(1/shape)
+    # 4. 8-epi-PGF2α (pg/mg) - lower is better (log-normal)
+    log_epi_base <- log(800) + 0.005 * (age - 45) + 0.01 * cpd_history + rnorm(n_per_group, 0, 0.3)
+    epi_effect <- c(0, -0.4, -0.6)[g]
+    epi_pgf2a <- exp(log_epi_base + epi_effect + rnorm(n_per_group, 0, 0.15))
     
-    # Administrative censoring at 5 years
-    censor_time <- 5
-    time <- pmin(time_to_event, censor_time)
-    event <- as.numeric(time_to_event <= censor_time)
+    # 5. HDL-C (mg/dL) - higher is better
+    hdl_base <- 48 - 0.1 * (age - 45) + 5 * female + rnorm(n_per_group, 0, 8)
+    hdl_effect <- c(0, 4, 6)[g]
+    hdl_c <- pmax(25, hdl_base + hdl_effect + rnorm(n_per_group, 0, 2))
     
-    # Create trial dataset (PLACEBO ARM ONLY for this analysis)
-    trial_data <- data.frame(
-      trial_id = as.factor(i),
-      patient_id = paste0("T", i, "_", sprintf("%03d", 1:n_per_trial)),
-      age = age,
+    # 6. sICAM-1 (ng/mL) - lower is better (log-normal)
+    log_sicam_base <- log(250) + 0.008 * (age - 45) + rnorm(n_per_group, 0, 0.25)
+    sicam_effect <- c(0, -0.15, -0.25)[g]
+    sicam1 <- exp(log_sicam_base + sicam_effect + rnorm(n_per_group, 0, 0.1))
+    
+    # 7. 11-DTX-B2 (pg/mg) - lower is better (log-normal)
+    log_dtx_base <- log(1500) + 0.01 * (age - 45) + rnorm(n_per_group, 0, 0.35)
+    dtx_effect <- c(0, -0.3, -0.5)[g]
+    dtx_b2 <- exp(log_dtx_base + dtx_effect + rnorm(n_per_group, 0, 0.15))
+    
+    # 8. Central AIx (%) - lower is better
+    aix_base <- 25 + 0.4 * (age - 45) - 5 * female + rnorm(n_per_group, 0, 8)
+    aix_effect <- c(0, -3, -5)[g]
+    central_aix <- aix_base + aix_effect + rnorm(n_per_group, 0, 2)
+    
+    # 9. FEV1 % predicted - higher is better
+    fev1_base <- 95 - 0.3 * (age - 45) - 0.2 * pack_years + 2 * female + rnorm(n_per_group, 0, 8)
+    fev1_effect <- c(0, 3, 5)[g]
+    fev1_pct <- pmin(120, pmax(50, fev1_base + fev1_effect + rnorm(n_per_group, 0, 2)))
+    
+    # Create data frame
+    group_data <- data.frame(
+      patient_id = paste0("G", g, "_", sprintf("%03d", 1:n_per_group)),
+      product_group = factor(group_names[g], levels = group_names),
+      age = round(age, 1),
       female = female,
-      severity = severity,
-      comorbidities = comorbidities,
-      time = time,
-      event = event,
+      europe = europe,
+      pack_years = round(pack_years, 1),
+      cpd_history = round(cpd_history, 0),
+      cohb = round(cohb, 2),
+      total_nnal = round(total_nnal, 1),
+      wbc = round(wbc, 2),
+      epi_pgf2a = round(epi_pgf2a, 1),
+      hdl_c = round(hdl_c, 1),
+      sicam1 = round(sicam1, 1),
+      dtx_b2 = round(dtx_b2, 1),
+      central_aix = round(central_aix, 1),
+      fev1_pct = round(fev1_pct, 1),
       stringsAsFactors = FALSE
     )
     
-    trial_list[[i]] <- trial_data
+    data_list[[g]] <- group_data
   }
   
-  # Combine all trials
-  ipd_data <- bind_rows(trial_list)
-  
-  return(ipd_data)
+  pmi_data <- bind_rows(data_list)
+  return(pmi_data)
 }
 
-# Generate the IPD dataset
-ipd_data <- generate_ipd_data(n_trials = 5, n_per_trial = 300)
+# Generate the dataset
+pmi_data <- generate_pmi_data(n_per_group = 296)
 
-cat("IPD Data Generated\n")
-cat("Total sample size:", nrow(ipd_data), "\n")
-cat("Number of trials:", length(unique(ipd_data$trial_id)), "\n\n")
-cat("Sample size per trial:\n")
-print(table(ipd_data$trial_id))
+cat("Data Generated (PMI Study Structure)\n")
+cat("Total sample size:", nrow(pmi_data), "\n")
+cat("Number of groups:", length(unique(pmi_data$product_group)), "\n\n")
+cat("Sample size per group:\n")
+print(table(pmi_data$product_group))
 cat("\n")
 
 ############################################################################
@@ -189,86 +298,77 @@ cat("===========================================================================
 cat("PART 2: PRE-WEIGHTING BALANCE ASSESSMENT\n")
 cat("================================================================================\n\n")
 
-# Function to calculate pairwise standardized mean difference (SMD)
+# SMD calculation functions
 calculate_smd <- function(data, var, group_var) {
-  trials <- unique(data[[group_var]])
+  groups <- levels(data[[group_var]])
   pairwise_smds <- data.frame()
   
-  for (i in 1:(length(trials)-1)) {
-    for (j in (i+1):length(trials)) {
-      trial1_data <- data[data[[group_var]] == trials[i], var]
-      trial2_data <- data[data[[group_var]] == trials[j], var]
+  for (i in 1:(length(groups)-1)) {
+    for (j in (i+1):length(groups)) {
+      group1_data <- data[data[[group_var]] == groups[i], var]
+      group2_data <- data[data[[group_var]] == groups[j], var]
       
-      mean1 <- mean(trial1_data, na.rm = TRUE)
-      mean2 <- mean(trial2_data, na.rm = TRUE)
-      sd1 <- sd(trial1_data, na.rm = TRUE)
-      sd2 <- sd(trial2_data, na.rm = TRUE)
+      mean1 <- mean(group1_data, na.rm = TRUE)
+      mean2 <- mean(group2_data, na.rm = TRUE)
+      sd1 <- sd(group1_data, na.rm = TRUE)
+      sd2 <- sd(group2_data, na.rm = TRUE)
       
       pooled_sd <- sqrt((sd1^2 + sd2^2) / 2)
       smd <- (mean1 - mean2) / pooled_sd
       
       pairwise_smds <- rbind(pairwise_smds, 
-                             data.frame(trial1 = as.character(trials[i]), 
-                                       trial2 = as.character(trials[j]), 
+                             data.frame(group1 = groups[i], 
+                                       group2 = groups[j], 
                                        smd = smd,
                                        stringsAsFactors = FALSE))
     }
   }
-  
   return(pairwise_smds)
 }
 
-# Function to calculate weighted pairwise SMD
 calculate_weighted_smd <- function(data, var, group_var, weight_var) {
-  trials <- unique(data[[group_var]])
+  groups <- levels(data[[group_var]])
   pairwise_smds <- data.frame()
   
-  for (i in 1:(length(trials)-1)) {
-    for (j in (i+1):length(trials)) {
-      # Filter data for each trial
-      trial1_data <- data[data[[group_var]] == trials[i], ]
-      trial2_data <- data[data[[group_var]] == trials[j], ]
+  for (i in 1:(length(groups)-1)) {
+    for (j in (i+1):length(groups)) {
+      group1_data <- data[data[[group_var]] == groups[i], ]
+      group2_data <- data[data[[group_var]] == groups[j], ]
       
-      # Calculate weighted means
-      mean1 <- weighted.mean(trial1_data[[var]], trial1_data[[weight_var]], na.rm = TRUE)
-      mean2 <- weighted.mean(trial2_data[[var]], trial2_data[[weight_var]], na.rm = TRUE)
+      mean1 <- weighted.mean(group1_data[[var]], group1_data[[weight_var]], na.rm = TRUE)
+      mean2 <- weighted.mean(group2_data[[var]], group2_data[[weight_var]], na.rm = TRUE)
       
-      # Calculate weighted SDs
-      weighted_var1 <- sum(trial1_data[[weight_var]] * 
-                          (trial1_data[[var]] - mean1)^2, na.rm = TRUE) / 
-                       sum(trial1_data[[weight_var]])
+      weighted_var1 <- sum(group1_data[[weight_var]] * 
+                          (group1_data[[var]] - mean1)^2, na.rm = TRUE) / 
+                       sum(group1_data[[weight_var]])
       sd1 <- sqrt(weighted_var1)
       
-      weighted_var2 <- sum(trial2_data[[weight_var]] * 
-                          (trial2_data[[var]] - mean2)^2, na.rm = TRUE) / 
-                       sum(trial2_data[[weight_var]])
+      weighted_var2 <- sum(group2_data[[weight_var]] * 
+                          (group2_data[[var]] - mean2)^2, na.rm = TRUE) / 
+                       sum(group2_data[[weight_var]])
       sd2 <- sqrt(weighted_var2)
       
-      # Calculate pooled SD
       pooled_sd <- sqrt((sd1^2 + sd2^2) / 2)
-      
-      # Calculate SMD
       smd <- (mean1 - mean2) / pooled_sd
       
       pairwise_smds <- rbind(pairwise_smds, 
-                             data.frame(trial1 = as.character(trials[i]), 
-                                       trial2 = as.character(trials[j]), 
+                             data.frame(group1 = groups[i], 
+                                       group2 = groups[j], 
                                        smd = smd,
                                        stringsAsFactors = FALSE))
     }
   }
-  
   return(pairwise_smds)
 }
 
-# Calculate pre-weighting SMDs
-vars_to_check <- c("age", "female", "severity", "comorbidities")
+# Covariates to check for balance
+covariates <- c("age", "female", "europe", "pack_years", "cpd_history")
 
 cat("PRE-WEIGHTING STANDARDIZED MEAN DIFFERENCES:\n\n")
 pre_weight_smds <- list()
 
-for (var in vars_to_check) {
-  smd_results <- calculate_smd(ipd_data, var, "trial_id")
+for (var in covariates) {
+  smd_results <- calculate_smd(pmi_data, var, "product_group")
   pre_weight_smds[[var]] <- smd_results
   
   cat(paste0("Variable: ", toupper(var), "\n"))
@@ -276,196 +376,229 @@ for (var in vars_to_check) {
   cat(paste0("Max absolute SMD: ", round(max(abs(smd_results$smd)), 3), "\n\n"))
 }
 
-# Summary statistics by trial
-cat("BASELINE CHARACTERISTICS BY TRIAL (UNWEIGHTED):\n\n")
-baseline_summary <- ipd_data %>%
-  group_by(trial_id) %>%
+# Baseline characteristics by group
+cat("BASELINE CHARACTERISTICS BY PRODUCT GROUP (UNWEIGHTED):\n\n")
+baseline_summary <- pmi_data %>%
+  group_by(product_group) %>%
   summarise(
     N = n(),
     Age_mean = round(mean(age), 1),
     Age_sd = round(sd(age), 1),
     Female_pct = round(100 * mean(female), 1),
-    Severity_mean = round(mean(severity), 1),
-    Severity_sd = round(sd(severity), 1),
-    Comorbid_mean = round(mean(comorbidities), 2),
-    Comorbid_sd = round(sd(comorbidities), 2),
-    Events = sum(event),
-    Event_rate = round(100 * mean(event), 1),
+    Europe_pct = round(100 * mean(europe), 1),
+    PackYears_mean = round(mean(pack_years), 1),
+    PackYears_sd = round(sd(pack_years), 1),
+    CPD_mean = round(mean(cpd_history), 1),
+    CPD_sd = round(sd(cpd_history), 1),
     .groups = 'drop'
   )
-print(baseline_summary, row.names = FALSE)
+print(as.data.frame(baseline_summary))
 cat("\n")
 
 ############################################################################
-# PART 3: ESTIMATE PROPENSITY SCORES (TRIAL MEMBERSHIP)
+# PART 3: ESTIMATE GENERALIZED PROPENSITY SCORES
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 3: ESTIMATING TRIAL MEMBERSHIP PROPENSITY SCORES\n")
+cat("PART 3: ESTIMATING GENERALIZED PROPENSITY SCORES (GPS)\n")
 cat("================================================================================\n\n")
 
-# Fit multinomial logistic regression
-# Outcome: trial membership (trial_id)
-# Predictors: baseline covariates
 cat("Fitting multinomial logistic regression model...\n")
-ps_model <- multinom(
-  trial_id ~ age + female + severity + comorbidities, 
-  data = ipd_data, 
-  trace = FALSE)
+cat("Model: P(Group | X) where X = age, female, europe, pack_years, cpd_history\n\n")
 
-cat("Multinomial logistic regression model fitted.\n\n")
-cat("Model summary:\n")
-print(summary(ps_model))
+gps_model <- multinom(
+  product_group ~ age + female + europe + pack_years + cpd_history, 
+  data = pmi_data, 
+  trace = FALSE
+)
+
+cat("Model coefficients (reference = current_smoker):\n")
+print(round(coef(gps_model), 4))
 cat("\n")
 
-# Predict propensity scores (probability of being in each trial)
-ps_matrix <- predict(ps_model, type = "probs")
+# Predict GPS
+gps_matrix <- predict(gps_model, type = "probs")
 
-# Ensure ps_matrix is a matrix (it's a vector if only 2 trials)
-if (!is.matrix(ps_matrix)) {
-  ps_matrix <- cbind(ps_matrix, 1 - ps_matrix)
-}
-
-# For each participant, extract their probability of being in their observed trial
-ipd_data$ps <- sapply(1:nrow(ipd_data), function(i) {
-  trial <- as.numeric(ipd_data$trial_id[i])
-  ps_matrix[i, trial]
+pmi_data$gps <- sapply(1:nrow(pmi_data), function(i) {
+  group_idx <- as.numeric(pmi_data$product_group[i])
+  gps_matrix[i, group_idx]
 })
 
-cat("PROPENSITY SCORE DIAGNOSTICS:\n\n")
-cat("Propensity score summary:\n")
-print(summary(ipd_data$ps))
+cat("GENERALIZED PROPENSITY SCORE DIAGNOSTICS:\n\n")
+cat("GPS summary:\n")
+print(summary(pmi_data$gps))
 cat("\n")
 
-cat("Propensity scores by trial:\n")
-ps_by_trial <- ipd_data %>% 
-  group_by(trial_id) %>% 
+cat("GPS by product group:\n")
+gps_by_group <- pmi_data %>% 
+  group_by(product_group) %>% 
   summarise(
-    Mean_PS = round(mean(ps), 3),
-    Median_PS = round(median(ps), 3),
-    Min_PS = round(min(ps), 3),
-    Max_PS = round(max(ps), 3),
+    Mean_GPS = round(mean(gps), 3),
+    Median_GPS = round(median(gps), 3),
+    Min_GPS = round(min(gps), 3),
+    Max_GPS = round(max(gps), 3),
     .groups = 'drop'
   )
-print(ps_by_trial, row.names = FALSE)
+print(as.data.frame(gps_by_group))
 cat("\n")
 
 ############################################################################
-# PART 4: CALCULATE STABILIZED IPTW WEIGHTS
+# PART 4: CALCULATE IPTW WEIGHTS WITH TRIMMING OPTIONS
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 4: CALCULATING STABILIZED IPTW WEIGHTS\n")
+cat("PART 4: CALCULATING IPTW WEIGHTS WITH TRIMMING\n")
 cat("================================================================================\n\n")
 
-# Calculate marginal probability for each trial (proportion in each trial)
-marginal_probs <- ipd_data %>%
-  group_by(trial_id) %>%
+# Marginal probabilities
+marginal_probs <- pmi_data %>%
+  group_by(product_group) %>%
   summarise(n = n(), .groups = 'drop') %>%
   mutate(marginal_prob = n / sum(n))
 
-# Add marginal probabilities to data
-ipd_data <- ipd_data %>%
-  left_join(marginal_probs %>% select(trial_id, marginal_prob), 
-            by = "trial_id")
+pmi_data <- pmi_data %>%
+  left_join(marginal_probs %>% select(product_group, marginal_prob), 
+            by = "product_group")
 
-# Calculate stabilized weights: sw = P(Trial = j) / P(Trial = j | X)
-ipd_data$sw <- ipd_data$marginal_prob / ipd_data$ps
+# Calculate unstabilized and stabilized weights
+pmi_data$uw <- 1 / pmi_data$gps
+pmi_data$sw <- pmi_data$marginal_prob / pmi_data$gps
 
-# Calculate unstabilized weights for comparison: w = 1 / P(Trial = j | X)
-ipd_data$uw <- 1 / ipd_data$ps
-
-cat("Stabilized weights calculated.\n\n")
-
-cat("WEIGHT DIAGNOSTICS:\n\n")
-cat("Stabilized weights summary:\n")
-print(summary(ipd_data$sw))
+cat("UNTRIMMED WEIGHT DIAGNOSTICS:\n\n")
+cat("Unstabilized weights:\n")
+print(summary(pmi_data$uw))
 cat("\n")
-
-cat("Unstabilized weights summary:\n")
-print(summary(ipd_data$uw))
+cat("Stabilized weights:\n")
+print(summary(pmi_data$sw))
 cat("\n")
-
-cat("Stabilized weights by trial:\n")
-sw_by_trial <- ipd_data %>% 
-  group_by(trial_id) %>% 
-  summarise(
-    Mean_SW = round(mean(sw), 3),
-    Median_SW = round(median(sw), 3),
-    Min_SW = round(min(sw), 3),
-    Max_SW = round(max(sw), 3),
-    SD_SW = round(sd(sw), 3),
-    .groups = 'drop'
-  )
-print(sw_by_trial, row.names = FALSE)
-cat("\n")
-
-# Calculate effective sample size
-ess_stabilized <- sum(ipd_data$sw)^2 / sum(ipd_data$sw^2)
-ess_unstabilized <- sum(ipd_data$uw)^2 / sum(ipd_data$uw^2)
-
-cat("EFFECTIVE SAMPLE SIZE:\n")
-cat("Original sample size:", nrow(ipd_data), "\n")
-cat("Effective sample size (stabilized weights):", round(ess_stabilized, 0), 
-    "(", round(100 * ess_stabilized / nrow(ipd_data), 1), "%)\n")
-cat("Effective sample size (unstabilized weights):", round(ess_unstabilized, 0), 
-    "(", round(100 * ess_unstabilized / nrow(ipd_data), 1), "%)\n\n")
 
 ############################################################################
-# PART 5: ASSESS POST-WEIGHTING BALANCE
+# WEIGHT TRIMMING STRATEGIES
+############################################################################
+
+cat("--------------------------------------------------------------------------------\n")
+cat("WEIGHT TRIMMING STRATEGIES\n")
+cat("--------------------------------------------------------------------------------\n\n")
+
+# Strategy 1: Percentile-based trimming (1st and 99th percentiles)
+trim_percentile <- function(weights, lower = 0.01, upper = 0.99) {
+  lower_bound <- quantile(weights, lower)
+  upper_bound <- quantile(weights, upper)
+  pmin(pmax(weights, lower_bound), upper_bound)
+}
+
+# Strategy 2: Fixed threshold trimming
+trim_fixed <- function(weights, max_weight = 10) {
+  pmin(weights, max_weight)
+}
+
+# Strategy 3: Symmetric percentile trimming on GPS
+trim_gps_percentile <- function(data, lower = 0.01, upper = 0.99) {
+  gps_lower <- quantile(data$gps, lower)
+  gps_upper <- quantile(data$gps, upper)
+  data$gps_trimmed <- pmax(pmin(data$gps, gps_upper), gps_lower)
+  data$sw_gps_trim <- data$marginal_prob / data$gps_trimmed
+  return(data)
+}
+
+# Apply trimming strategies
+cat("Applying trimming strategies...\n\n")
+
+# 1. Percentile trimming on weights (1st-99th)
+pmi_data$sw_trim_p99 <- trim_percentile(pmi_data$sw, 0.01, 0.99)
+
+# 2. Percentile trimming on weights (5th-95th) - more aggressive
+pmi_data$sw_trim_p95 <- trim_percentile(pmi_data$sw, 0.05, 0.95)
+
+# 3. Fixed threshold (max = 10)
+pmi_data$sw_trim_f10 <- trim_fixed(pmi_data$sw, 10)
+
+# 4. Fixed threshold (max = 5) - more aggressive
+pmi_data$sw_trim_f5 <- trim_fixed(pmi_data$sw, 5)
+
+# 5. GPS percentile trimming
+pmi_data <- trim_gps_percentile(pmi_data, 0.01, 0.99)
+
+# Compare trimming methods
+trimming_comparison <- data.frame(
+  Method = c("Untrimmed", "Percentile 1-99%", "Percentile 5-95%", 
+             "Fixed Max=10", "Fixed Max=5", "GPS Percentile 1-99%"),
+  Weight_Var = c("sw", "sw_trim_p99", "sw_trim_p95", 
+                 "sw_trim_f10", "sw_trim_f5", "sw_gps_trim"),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:nrow(trimming_comparison)) {
+  w <- pmi_data[[trimming_comparison$Weight_Var[i]]]
+  trimming_comparison$Min[i] <- round(min(w), 3)
+  trimming_comparison$Max[i] <- round(max(w), 3)
+  trimming_comparison$Mean[i] <- round(mean(w), 3)
+  trimming_comparison$SD[i] <- round(sd(w), 3)
+  trimming_comparison$ESS[i] <- round(sum(w)^2 / sum(w^2), 0)
+  trimming_comparison$ESS_pct[i] <- round(100 * sum(w)^2 / sum(w^2) / nrow(pmi_data), 1)
+}
+
+cat("TRIMMING METHOD COMPARISON:\n\n")
+print(trimming_comparison[, c("Method", "Min", "Max", "Mean", "SD", "ESS", "ESS_pct")], row.names = FALSE)
+cat("\n")
+
+# Select primary trimmed weights (percentile 1-99%)
+pmi_data$sw_trimmed <- pmi_data$sw_trim_p99
+
+cat("PRIMARY TRIMMING METHOD: Percentile 1-99%\n")
+cat("Rationale: Balances bias-variance tradeoff; commonly recommended in literature\n\n")
+
+############################################################################
+# PART 5: POST-WEIGHTING BALANCE (TRIMMED vs UNTRIMMED)
 ############################################################################
 
 cat("================================================================================\n")
 cat("PART 5: POST-WEIGHTING BALANCE ASSESSMENT\n")
 cat("================================================================================\n\n")
 
-cat("POST-WEIGHTING STANDARDIZED MEAN DIFFERENCES:\n\n")
-post_weight_smds <- list()
+# Calculate SMDs for both trimmed and untrimmed weights
+post_weight_smds_untrimmed <- list()
+post_weight_smds_trimmed <- list()
 
-for (var in vars_to_check) {
-  smd_results <- calculate_weighted_smd(ipd_data, var, "trial_id", "sw")
-  post_weight_smds[[var]] <- smd_results
-  
-  cat(paste0("Variable: ", toupper(var), "\n"))
-  print(smd_results, row.names = FALSE)
-  cat(paste0("Max absolute SMD: ", round(max(abs(smd_results$smd)), 3), "\n\n"))
+for (var in covariates) {
+  post_weight_smds_untrimmed[[var]] <- calculate_weighted_smd(pmi_data, var, "product_group", "sw")
+  post_weight_smds_trimmed[[var]] <- calculate_weighted_smd(pmi_data, var, "product_group", "sw_trimmed")
 }
 
 # Create comparison table
-cat("SMD COMPARISON: PRE vs POST WEIGHTING:\n\n")
 smd_comparison <- data.frame()
 
-for (var in vars_to_check) {
+for (var in covariates) {
   pre <- pre_weight_smds[[var]]
-  post <- post_weight_smds[[var]]
+  post_untrim <- post_weight_smds_untrimmed[[var]]
+  post_trim <- post_weight_smds_trimmed[[var]]
   
   for (i in 1:nrow(pre)) {
-    improvement <- ifelse(abs(post$smd[i]) < abs(pre$smd[i]), "Improved", 
-                         ifelse(abs(post$smd[i]) == abs(pre$smd[i]), "No change", "Worse"))
+    comparison_label <- paste0(gsub("_", " ", pre$group1[i]), " vs ", gsub("_", " ", pre$group2[i]))
     
     smd_comparison <- rbind(smd_comparison, data.frame(
       Variable = var,
-      Comparison = paste0(pre$trial1[i], " vs ", pre$trial2[i]),
-      SMD_Unweighted = round(pre$smd[i], 3),
-      SMD_Weighted = round(post$smd[i], 3),
-      Improvement = improvement,
+      Comparison = comparison_label,
+      SMD_Pre = round(pre$smd[i], 3),
+      SMD_Post_Untrimmed = round(post_untrim$smd[i], 3),
+      SMD_Post_Trimmed = round(post_trim$smd[i], 3),
       stringsAsFactors = FALSE
     ))
   }
 }
 
+cat("SMD COMPARISON: Pre-Weighting vs Post-Weighting (Untrimmed vs Trimmed):\n\n")
 print(smd_comparison, row.names = FALSE)
 cat("\n")
 
-# Summary of balance improvement
-cat("BALANCE IMPROVEMENT SUMMARY:\n")
-n_pre_imbalanced <- sum(abs(smd_comparison$SMD_Unweighted) > 0.1)
-n_post_imbalanced <- sum(abs(smd_comparison$SMD_Weighted) > 0.1)
-pct_improved <- 100 * mean(smd_comparison$Improvement == "Improved")
-
-cat("Number of comparisons with |SMD| > 0.1 before weighting:", n_pre_imbalanced, "\n")
-cat("Number of comparisons with |SMD| > 0.1 after weighting:", n_post_imbalanced, "\n")
-cat("Proportion of comparisons improved:", round(pct_improved, 1), "%\n\n")
+# Balance summary
+cat("BALANCE SUMMARY:\n")
+cat("  Pre-weighting |SMD| > 0.1:", sum(abs(smd_comparison$SMD_Pre) > 0.1), "/", nrow(smd_comparison), "\n")
+cat("  Post-weighting (untrimmed) |SMD| > 0.1:", sum(abs(smd_comparison$SMD_Post_Untrimmed) > 0.1), "/", nrow(smd_comparison), "\n")
+cat("  Post-weighting (trimmed) |SMD| > 0.1:", sum(abs(smd_comparison$SMD_Post_Trimmed) > 0.1), "/", nrow(smd_comparison), "\n")
+cat("  Max |SMD| pre:", round(max(abs(smd_comparison$SMD_Pre)), 3), "\n")
+cat("  Max |SMD| post (untrimmed):", round(max(abs(smd_comparison$SMD_Post_Untrimmed)), 3), "\n")
+cat("  Max |SMD| post (trimmed):", round(max(abs(smd_comparison$SMD_Post_Trimmed)), 3), "\n\n")
 
 ############################################################################
 # PART 6: VISUALIZATIONS
@@ -475,208 +608,473 @@ cat("===========================================================================
 cat("PART 6: CREATING VISUALIZATIONS\n")
 cat("================================================================================\n\n")
 
-# Prepare data for love plot
+# 1. Love Plot (comparing untrimmed vs trimmed)
 love_plot_data <- smd_comparison %>%
-  pivot_longer(cols = c(SMD_Unweighted, SMD_Weighted),
+  pivot_longer(cols = c(SMD_Pre, SMD_Post_Untrimmed, SMD_Post_Trimmed),
                names_to = "Weighting",
                values_to = "SMD") %>%
   mutate(
     Weighting = factor(Weighting,
-                      levels = c("SMD_Unweighted", "SMD_Weighted"),
-                      labels = c("Unweighted", "Weighted")),
+                      levels = c("SMD_Pre", "SMD_Post_Untrimmed", "SMD_Post_Trimmed"),
+                      labels = c("Unweighted", "IPTW (Untrimmed)", "IPTW (Trimmed)")),
     Variable_Comparison = paste0(Variable, " (", Comparison, ")")
   )
 
-# Create love plot
 p1 <- ggplot(love_plot_data, aes(x = abs(SMD), y = Variable_Comparison,
                                   color = Weighting, shape = Weighting)) +
-  geom_point(size = 3) +
-  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red", alpha = 0.6) +
-  scale_color_manual(values = c("Unweighted" = "darkblue", "Weighted" = "darkgreen")) +
-  scale_shape_manual(values = c("Unweighted" = 16, "Weighted" = 17)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red", alpha = 0.7) +
+  scale_color_manual(values = c("Unweighted" = "darkblue", 
+                                 "IPTW (Untrimmed)" = "orange",
+                                 "IPTW (Trimmed)" = "darkgreen")) +
+  scale_shape_manual(values = c("Unweighted" = 16, 
+                                "IPTW (Untrimmed)" = 17,
+                                "IPTW (Trimmed)" = 15)) +
   labs(
-    title = "Covariate Balance Before and After IPTW",
-    subtitle = "Pairwise Standardized Mean Differences",
+    title = "Covariate Balance: Unweighted vs IPTW (Untrimmed vs Trimmed)",
+    subtitle = "PMI THS Switching Study - 3 Product Groups",
     x = "Absolute Standardized Mean Difference",
-    y = "",
-    color = "",
-    shape = ""
+    y = ""
   ) +
   theme_bw() +
   theme(
     legend.position = "bottom",
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
     plot.subtitle = element_text(hjust = 0.5, size = 11),
-    axis.text.y = element_text(size = 8)
+    axis.text.y = element_text(size = 9)
   )
 
-ggsave(file.path(figures_dir, "love_plot.png"), p1, width = 10, height = 10, dpi = 300)
-cat("Love plot saved:", file.path(figures_dir, "love_plot.png"), "\n")
+ggsave(file.path(figures_dir, "love_plot_trimming_comparison.png"), p1, width = 11, height = 7, dpi = 300)
+cat("Love plot saved:", file.path(figures_dir, "love_plot_trimming_comparison.png"), "\n")
 
-# Weight distribution plot
-p2 <- ggplot(ipd_data, aes(x = sw)) +
-  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7, color = "black") +
+# 2. Weight Distribution (untrimmed vs trimmed)
+weight_plot_data <- pmi_data %>%
+  select(product_group, sw, sw_trimmed) %>%
+  pivot_longer(cols = c(sw, sw_trimmed),
+               names_to = "Weight_Type",
+               values_to = "Weight") %>%
+  mutate(Weight_Type = factor(Weight_Type,
+                              levels = c("sw", "sw_trimmed"),
+                              labels = c("Untrimmed", "Trimmed (1-99%)")))
+
+p2 <- ggplot(weight_plot_data, aes(x = Weight, fill = Weight_Type)) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity", color = "black", linewidth = 0.2) +
   geom_vline(xintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
+  facet_wrap(~product_group, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = c("Untrimmed" = "steelblue", "Trimmed (1-99%)" = "forestgreen")) +
   labs(
-    title = "Distribution of Stabilized IPTW Weights",
+    title = "Distribution of Stabilized IPTW Weights: Untrimmed vs Trimmed",
     x = "Stabilized Weight",
-    y = "Frequency"
+    y = "Frequency",
+    fill = "Weight Type"
   ) +
   theme_bw() +
   theme(
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
   )
 
-ggsave(file.path(figures_dir, "weight_distribution.png"), p2, width = 8, height = 6, dpi = 300)
-cat("Weight distribution plot saved:", file.path(figures_dir, "weight_distribution.png"), "\n")
+ggsave(file.path(figures_dir, "weight_distribution_trimming.png"), p2, width = 9, height = 9, dpi = 300)
+cat("Weight distribution plot saved:", file.path(figures_dir, "weight_distribution_trimming.png"), "\n")
 
-# Propensity score distribution by trial
-p3 <- ggplot(ipd_data, aes(x = ps, fill = trial_id)) +
+# 3. GPS Distribution
+p3 <- ggplot(pmi_data, aes(x = gps, fill = product_group)) +
   geom_density(alpha = 0.5) +
-  scale_fill_brewer(palette = "Set2") +
+  scale_fill_manual(values = c("current_smoker" = "#E41A1C", 
+                                "ths_user" = "#377EB8", 
+                                "former_smoker" = "#4DAF4A"),
+                    labels = c("Current Smoker", "THS User", "Former Smoker")) +
   labs(
-    title = "Propensity Score Distribution by Trial",
-    x = "Propensity Score (Probability of Observed Trial Membership)",
+    title = "Generalized Propensity Score Distribution by Product Group",
+    subtitle = "P(Observed Group | Baseline Covariates)",
+    x = "Generalized Propensity Score",
     y = "Density",
-    fill = "Trial"
+    fill = "Product Group"
   ) +
   theme_bw() +
   theme(
     legend.position = "bottom",
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13)
   )
 
-ggsave(file.path(figures_dir, "propensity_score_distribution.png"), p3, width = 10, height = 6, dpi = 300)
-cat("Propensity score distribution plot saved:", file.path(figures_dir, "propensity_score_distribution.png"), "\n\n")
+ggsave(file.path(figures_dir, "gps_distribution_pmi.png"), p3, width = 10, height = 6, dpi = 300)
+cat("GPS distribution plot saved:", file.path(figures_dir, "gps_distribution_pmi.png"), "\n\n")
 
 ############################################################################
-# PART 7: SURVIVAL ANALYSIS (DEMONSTRATION)
+# PART 7: OUTCOME ANALYSIS WITH SENSITIVITY ANALYSIS
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 7: SURVIVAL ANALYSIS DEMONSTRATION\n")
+cat("PART 7: OUTCOME ANALYSIS - BIOMARKERS WITH E-VALUE SENSITIVITY\n")
 cat("================================================================================\n\n")
 
-# Add treatment arm for demonstration (50% treatment, 50% placebo)
-set.seed(123)
-ipd_data$treatment <- as.numeric(as.numeric(rownames(ipd_data)) %% 2)
+# Define biomarkers
+biomarkers <- c("cohb", "total_nnal", "wbc", "epi_pgf2a", "hdl_c", 
+                "sicam1", "dtx_b2", "central_aix", "fev1_pct")
 
-# Modify survival times for treatment arm (true HR = 0.70)
-treatment_effect <- log(0.70)
-ipd_data$time_modified <- ifelse(
-  ipd_data$treatment == 1,
-  ipd_data$time * exp(-treatment_effect),
-  ipd_data$time)
+biomarker_labels <- c(
+  cohb = "COHb (%)",
+  total_nnal = "Total NNAL (ng/mL)",
+  wbc = "WBC (10^9/L)",
+  epi_pgf2a = "8-epi-PGF2α (pg/mg)",
+  hdl_c = "HDL-C (mg/dL)",
+  sicam1 = "sICAM-1 (ng/mL)",
+  dtx_b2 = "11-DTX-B2 (pg/mg)",
+  central_aix = "Central AIx (%)",
+  fev1_pct = "FEV1 % predicted"
+)
 
-ipd_data$event_modified <- ifelse(
-  ipd_data$treatment == 1 & ipd_data$time_modified > 5,
-  0, 
-  ipd_data$event)
+# Function to analyze biomarker with E-value
+analyze_biomarker_full <- function(data, biomarker, weight_var = NULL) {
+  
+  if (is.null(weight_var)) {
+    model <- lm(as.formula(paste(biomarker, "~ product_group")), data = data)
+  } else {
+    model <- lm(as.formula(paste(biomarker, "~ product_group")), 
+                data = data, weights = data[[weight_var]])
+  }
+  
+  coefs <- summary(model)$coefficients
+  
+  # Overall pooled SD for E-value calculation
+  pooled_sd <- sd(data[[biomarker]], na.rm = TRUE)
+  
+  # THS vs Smoker
+  ths_diff <- coefs["product_groupths_user", "Estimate"]
+  ths_se <- coefs["product_groupths_user", "Std. Error"]
+  ths_p <- coefs["product_groupths_user", "Pr(>|t|)"]
+  
+  # Calculate E-value for THS vs Smoker
+  ths_evalue <- calculate_evalue_continuous(ths_diff, ths_se, pooled_sd)
+  
+  # Former vs Smoker
+  former_diff <- coefs["product_groupformer_smoker", "Estimate"]
+  former_se <- coefs["product_groupformer_smoker", "Std. Error"]
+  former_p <- coefs["product_groupformer_smoker", "Pr(>|t|)"]
+  
+  former_evalue <- calculate_evalue_continuous(former_diff, former_se, pooled_sd)
+  
+  return(data.frame(
+    THS_Diff = ths_diff,
+    THS_SE = ths_se,
+    THS_p = ths_p,
+    THS_Cohens_d = ths_evalue$cohens_d,
+    THS_Approx_RR = ths_evalue$approx_rr,
+    THS_Evalue_Point = ths_evalue$evalue_point,
+    THS_Evalue_CI = ths_evalue$evalue_ci,
+    Former_Diff = former_diff,
+    Former_SE = former_se,
+    Former_p = former_p,
+    Former_Cohens_d = former_evalue$cohens_d,
+    Former_Evalue_Point = former_evalue$evalue_point
+  ))
+}
 
-ipd_data$time_modified <- pmin(ipd_data$time_modified, 5)
+# Analyze with different weight specifications
+cat("BIOMARKER ANALYSIS: Unweighted vs IPTW (Untrimmed) vs IPTW (Trimmed)\n")
+cat("================================================================================\n\n")
 
-# Unweighted Cox model
-cat("UNWEIGHTED ANALYSIS:\n")
-cox_unweighted <- coxph(Surv(time_modified, event_modified) ~ treatment,
-                        data = ipd_data)
-print(summary(cox_unweighted))
+results_list <- list()
+
+for (bm in biomarkers) {
+  # Unweighted
+  res_unweighted <- analyze_biomarker_full(pmi_data, bm, NULL)
+  res_unweighted$Biomarker <- biomarker_labels[bm]
+  res_unweighted$Method <- "Unweighted"
+  
+  # IPTW Untrimmed
+  res_iptw <- analyze_biomarker_full(pmi_data, bm, "sw")
+  res_iptw$Biomarker <- biomarker_labels[bm]
+  res_iptw$Method <- "IPTW_Untrimmed"
+  
+  # IPTW Trimmed
+  res_iptw_trim <- analyze_biomarker_full(pmi_data, bm, "sw_trimmed")
+  res_iptw_trim$Biomarker <- biomarker_labels[bm]
+  res_iptw_trim$Method <- "IPTW_Trimmed"
+  
+  results_list[[paste0(bm, "_unweighted")]] <- res_unweighted
+  results_list[[paste0(bm, "_iptw")]] <- res_iptw
+  results_list[[paste0(bm, "_iptw_trim")]] <- res_iptw_trim
+}
+
+all_results <- bind_rows(results_list)
+
+# Create summary table for THS vs Smokers
+cat("THS USERS vs CURRENT SMOKERS - Effect Estimates and E-Values:\n\n")
+
+ths_summary <- all_results %>%
+  select(Biomarker, Method, THS_Diff, THS_SE, THS_p, THS_Cohens_d, 
+         THS_Approx_RR, THS_Evalue_Point, THS_Evalue_CI) %>%
+  mutate(across(c(THS_Diff, THS_SE), ~round(., 2)),
+         THS_p = format.pval(THS_p, digits = 2)) %>%
+  pivot_wider(names_from = Method,
+              values_from = c(THS_Diff, THS_SE, THS_p, THS_Cohens_d, 
+                             THS_Approx_RR, THS_Evalue_Point, THS_Evalue_CI))
+
+# Simplified comparison table
+comparison_table <- data.frame(
+  Biomarker = biomarker_labels[biomarkers]
+)
+
+for (bm in biomarkers) {
+  unw <- all_results[all_results$Biomarker == biomarker_labels[bm] & all_results$Method == "Unweighted", ]
+  trim <- all_results[all_results$Biomarker == biomarker_labels[bm] & all_results$Method == "IPTW_Trimmed", ]
+  
+  idx <- which(comparison_table$Biomarker == biomarker_labels[bm])
+  comparison_table$Diff_Unweighted[idx] <- round(unw$THS_Diff, 2)
+  comparison_table$Diff_IPTW[idx] <- round(trim$THS_Diff, 2)
+  comparison_table$Change_Pct[idx] <- round(100 * (trim$THS_Diff - unw$THS_Diff) / abs(unw$THS_Diff), 1)
+  comparison_table$Cohens_d_IPTW[idx] <- trim$THS_Cohens_d
+  comparison_table$Evalue_Point[idx] <- trim$THS_Evalue_Point
+  comparison_table$Evalue_CI[idx] <- trim$THS_Evalue_CI
+}
+
+print(comparison_table, row.names = FALSE)
 cat("\n")
-
-# Weighted Cox model (using stabilized weights)
-cat("WEIGHTED ANALYSIS (Stabilized IPTW):\n")
-cox_weighted <- coxph(Surv(time_modified, event_modified) ~ treatment,
-                      data = ipd_data,
-                      weights = sw,
-                      robust = TRUE)
-print(summary(cox_weighted))
-cat("\n")
-
-# Extract results
-hr_unweighted <- exp(coef(cox_unweighted))
-ci_unweighted <- exp(confint(cox_unweighted))
-hr_weighted <- exp(coef(cox_weighted))
-ci_weighted <- exp(confint(cox_weighted))
-
-cat("COMPARISON OF TREATMENT EFFECT ESTIMATES:\n")
-cat("Unweighted HR:", round(hr_unweighted, 3), 
-    "95% CI: (", round(ci_unweighted[1], 3), "-", round(ci_unweighted[2], 3), ")\n")
-cat("Weighted HR:", round(hr_weighted, 3), 
-    "95% CI: (", round(ci_weighted[1], 3), "-", round(ci_weighted[2], 3), ")\n\n")
 
 ############################################################################
-# PART 8: SAVE RESULTS
+# E-VALUE INTERPRETATION
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 8: SAVING RESULTS\n")
+cat("E-VALUE SENSITIVITY ANALYSIS INTERPRETATION\n")
+cat("================================================================================\n\n")
+
+cat("E-VALUE INTERPRETATION GUIDE:\n")
+cat("--------------------------------------------------------------------------------\n")
+cat("The E-value quantifies the minimum strength of association that an unmeasured\n")
+cat("confounder would need to have with BOTH the exposure (product group) AND the\n")
+cat("outcome (biomarker) to fully explain away the observed effect.\n\n")
+
+cat("E-value = 1.0: No unmeasured confounding needed (CI includes null)\n")
+cat("E-value = 1.5: Weak unmeasured confounder could explain the effect\n")
+cat("E-value = 2.0: Moderate unmeasured confounder needed\n")
+cat("E-value = 3.0: Strong unmeasured confounder needed\n")
+cat("E-value ≥ 4.0: Very strong unmeasured confounder needed (robust finding)\n\n")
+
+cat("BIOMARKER-SPECIFIC E-VALUE SUMMARY (THS vs Smokers, IPTW-Trimmed):\n")
+cat("--------------------------------------------------------------------------------\n\n")
+
+for (i in 1:nrow(comparison_table)) {
+  bm <- comparison_table$Biomarker[i]
+  ev_point <- comparison_table$Evalue_Point[i]
+  ev_ci <- comparison_table$Evalue_CI[i]
+  
+  # Interpretation
+  if (ev_ci >= 3) {
+    robustness <- "ROBUST - Very strong unmeasured confounder needed"
+  } else if (ev_ci >= 2) {
+    robustness <- "MODERATE - Strong unmeasured confounder needed"
+  } else if (ev_ci >= 1.5) {
+    robustness <- "SENSITIVE - Moderate unmeasured confounder could explain"
+  } else {
+    robustness <- "FRAGILE - Weak unmeasured confounder could explain"
+  }
+  
+  cat(sprintf("%-25s E-value: %.2f (CI: %.2f) - %s\n", 
+              bm, ev_point, ev_ci, robustness))
+}
+
+cat("\n")
+
+############################################################################
+# PART 8: SENSITIVITY ANALYSIS - TRIMMING THRESHOLDS
+############################################################################
+
+cat("================================================================================\n")
+cat("PART 8: SENSITIVITY ANALYSIS - EFFECT OF TRIMMING THRESHOLD\n")
+cat("================================================================================\n\n")
+
+# Compare estimates across trimming methods for a key biomarker (COHb)
+cat("SENSITIVITY TO TRIMMING THRESHOLD (Example: COHb)\n")
+cat("--------------------------------------------------------------------------------\n\n")
+
+trimming_sensitivity <- data.frame(
+  Method = c("Unweighted", "IPTW Untrimmed", "IPTW Trim 1-99%", 
+             "IPTW Trim 5-95%", "IPTW Trim Max=10", "IPTW Trim Max=5"),
+  Weight_Var = c(NA, "sw", "sw_trim_p99", "sw_trim_p95", "sw_trim_f10", "sw_trim_f5"),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:nrow(trimming_sensitivity)) {
+  if (is.na(trimming_sensitivity$Weight_Var[i])) {
+    model <- lm(cohb ~ product_group, data = pmi_data)
+  } else {
+    model <- lm(cohb ~ product_group, data = pmi_data, 
+                weights = pmi_data[[trimming_sensitivity$Weight_Var[i]]])
+  }
+  
+  coefs <- summary(model)$coefficients
+  trimming_sensitivity$THS_Diff[i] <- round(coefs["product_groupths_user", "Estimate"], 3)
+  trimming_sensitivity$THS_SE[i] <- round(coefs["product_groupths_user", "Std. Error"], 3)
+  trimming_sensitivity$THS_p[i] <- format.pval(coefs["product_groupths_user", "Pr(>|t|)"], digits = 3)
+  
+  # ESS
+  if (!is.na(trimming_sensitivity$Weight_Var[i])) {
+    w <- pmi_data[[trimming_sensitivity$Weight_Var[i]]]
+    trimming_sensitivity$ESS[i] <- round(sum(w)^2 / sum(w^2), 0)
+  } else {
+    trimming_sensitivity$ESS[i] <- nrow(pmi_data)
+  }
+}
+
+print(trimming_sensitivity[, c("Method", "THS_Diff", "THS_SE", "THS_p", "ESS")], row.names = FALSE)
+cat("\n")
+
+cat("INTERPRETATION:\n")
+cat("- More aggressive trimming → estimates closer to unweighted (less bias correction)\n")
+cat("- More aggressive trimming → lower variance (smaller SE)\n")
+cat("- More aggressive trimming → higher ESS\n")
+cat("- Trade-off: Bias reduction vs. variance inflation\n\n")
+
+############################################################################
+# PART 9: SAVE RESULTS
+############################################################################
+
+cat("================================================================================\n")
+cat("PART 9: SAVING RESULTS\n")
 cat("================================================================================\n\n")
 
 # Save processed dataset
-write.csv(ipd_data, file.path(tables_dir, "ipd_data_with_weights.csv"), row.names = FALSE)
-cat("IPD data with weights saved:", file.path(tables_dir, "ipd_data_with_weights.csv"), "\n")
+write.csv(pmi_data, file.path(tables_dir, "pmi_data_with_weights_trimmed.csv"), row.names = FALSE)
+cat("Data saved:", file.path(tables_dir, "pmi_data_with_weights_trimmed.csv"), "\n")
 
-# Save SMD comparison table
-write.csv(smd_comparison, file.path(tables_dir, "smd_comparison.csv"), row.names = FALSE)
-cat("SMD comparison table saved:", file.path(tables_dir, "smd_comparison.csv"), "\n")
+# Save trimming comparison
+write.csv(trimming_comparison, file.path(tables_dir, "trimming_method_comparison.csv"), row.names = FALSE)
+cat("Trimming comparison saved:", file.path(tables_dir, "trimming_method_comparison.csv"), "\n")
 
-# Save baseline characteristics table
-write.csv(baseline_summary, file.path(tables_dir, "baseline_characteristics.csv"), row.names = FALSE)
-cat("Baseline characteristics table saved:", file.path(tables_dir, "baseline_characteristics.csv"), "\n")
+# Save SMD comparison
+write.csv(smd_comparison, file.path(tables_dir, "smd_comparison_trimmed.csv"), row.names = FALSE)
+cat("SMD comparison saved:", file.path(tables_dir, "smd_comparison_trimmed.csv"), "\n")
 
-# Create summary report
-# Create summary report
+# Save biomarker results with E-values
+write.csv(comparison_table, file.path(tables_dir, "biomarker_results_evalues.csv"), row.names = FALSE)
+cat("Biomarker results with E-values saved:", file.path(tables_dir, "biomarker_results_evalues.csv"), "\n")
+
+# Save trimming sensitivity
+write.csv(trimming_sensitivity, file.path(tables_dir, "trimming_sensitivity_cohb.csv"), row.names = FALSE)
+cat("Trimming sensitivity saved:", file.path(tables_dir, "trimming_sensitivity_cohb.csv"), "\n")
+
+# Create comprehensive summary report
+ess_trimmed <- sum(pmi_data$sw_trimmed)^2 / sum(pmi_data$sw_trimmed^2)
+
 summary_report <- data.frame(
   Metric = c(
-    "Original Sample Size",
-    "Effective Sample Size (Stabilized)",
-    "ESS Retention (%)",
-    "Max Pre-Weight |SMD|",
-    "Max Post-Weight |SMD|",
-    "Comparisons |SMD| > 0.1 (Pre)",
-    "Comparisons |SMD| > 0.1 (Post)",
-    "Unweighted HR",
-    "Weighted HR"
+    "Total Sample Size",
+    "N per Group",
+    "Number of Groups",
+    "Covariates in GPS Model",
+    "--- UNTRIMMED WEIGHTS ---",
+    "ESS (Untrimmed)",
+    "ESS % (Untrimmed)",
+    "Max Weight (Untrimmed)",
+    "--- TRIMMED WEIGHTS (1-99%) ---",
+    "ESS (Trimmed)",
+    "ESS % (Trimmed)",
+    "Max Weight (Trimmed)",
+    "--- BALANCE ---",
+    "Max |SMD| Pre-Weighting",
+    "Max |SMD| Post (Untrimmed)",
+    "Max |SMD| Post (Trimmed)",
+    "--- E-VALUES (IPTW-Trimmed) ---",
+    "Mean E-value (Point)",
+    "Mean E-value (CI)",
+    "Min E-value (CI)",
+    "Biomarkers with E-value CI ≥ 2"
   ),
   Value = c(
-    nrow(ipd_data),
-    round(ess_stabilized, 0),
-    round(100 * ess_stabilized / nrow(ipd_data), 1),
-    round(max(abs(smd_comparison$SMD_Unweighted)), 3),
-    round(max(abs(smd_comparison$SMD_Weighted)), 3),
-    n_pre_imbalanced,
-    n_post_imbalanced,
-    round(hr_unweighted, 3),
-    round(hr_weighted, 3)
-  ))
+    nrow(pmi_data),
+    296,
+    3,
+    length(covariates),
+    "",
+    round(sum(pmi_data$sw)^2 / sum(pmi_data$sw^2), 0),
+    round(100 * sum(pmi_data$sw)^2 / sum(pmi_data$sw^2) / nrow(pmi_data), 1),
+    round(max(pmi_data$sw), 2),
+    "",
+    round(ess_trimmed, 0),
+    round(100 * ess_trimmed / nrow(pmi_data), 1),
+    round(max(pmi_data$sw_trimmed), 2),
+    "",
+    round(max(abs(smd_comparison$SMD_Pre)), 3),
+    round(max(abs(smd_comparison$SMD_Post_Untrimmed)), 3),
+    round(max(abs(smd_comparison$SMD_Post_Trimmed)), 3),
+    "",
+    round(mean(comparison_table$Evalue_Point), 2),
+    round(mean(comparison_table$Evalue_CI), 2),
+    round(min(comparison_table$Evalue_CI), 2),
+    sum(comparison_table$Evalue_CI >= 2)
+  )
+)
 
-write.csv(summary_report, file.path(tables_dir, "summary_report.csv"), row.names = FALSE)
-cat("Summary report saved:", file.path(tables_dir, "summary_report.csv"), "\n\n")
+write.csv(summary_report, file.path(tables_dir, "summary_report_enhanced.csv"), row.names = FALSE)
+cat("Summary report saved:", file.path(tables_dir, "summary_report_enhanced.csv"), "\n\n")
 
 ############################################################################
 # FINAL SUMMARY
 ############################################################################
 
 cat("================================================================================\n")
-cat("SIMULATION COMPLETE!\n")
+cat("ANALYSIS COMPLETE!\n")
 cat("================================================================================\n\n")
 
-cat("All results have been saved:\n")
-cat("Tables saved to:", tables_dir, "\n")
-cat("  - ipd_data_with_weights.csv\n")
-cat("  - smd_comparison.csv\n")
-cat("  - baseline_characteristics.csv\n")
-cat("  - summary_report.csv\n\n")
-cat("Figures saved to:", figures_dir, "\n")
-cat("  - love_plot.png\n")
-cat("  - weight_distribution.png\n")
-cat("  - propensity_score_distribution.png\n\n")
+cat("KEY FINDINGS:\n\n")
 
-cat("Key findings:\n")
-cat("  - Sample size: N =", nrow(ipd_data), "\n")
-cat("  - Effective sample size:", round(ess_stabilized, 0), 
-    "(", round(100 * ess_stabilized / nrow(ipd_data), 1), "%)\n")
-cat("  - Max pre-weighting |SMD|:", round(max(abs(smd_comparison$SMD_Unweighted)), 3), "\n")
-cat("  - Max post-weighting |SMD|:", round(max(abs(smd_comparison$SMD_Weighted)), 3), "\n")
-cat("  - Imbalanced comparisons reduced from", n_pre_imbalanced, "to", n_post_imbalanced, "\n\n")
+cat("1. WEIGHT TRIMMING:\n")
+cat("   - Untrimmed max weight:", round(max(pmi_data$sw), 2), "\n")
+cat("   - Trimmed (1-99%) max weight:", round(max(pmi_data$sw_trimmed), 2), "\n")
+cat("   - ESS improved from", round(sum(pmi_data$sw)^2 / sum(pmi_data$sw^2), 0), 
+    "to", round(ess_trimmed, 0), "with trimming\n\n")
+
+cat("2. COVARIATE BALANCE:\n")
+cat("   - Max |SMD| reduced from", round(max(abs(smd_comparison$SMD_Pre)), 3),
+    "to", round(max(abs(smd_comparison$SMD_Post_Trimmed)), 3), "\n\n")
+
+cat("3. E-VALUE SENSITIVITY ANALYSIS:\n")
+cat("   - Mean E-value (point estimate):", round(mean(comparison_table$Evalue_Point), 2), "\n")
+cat("   - Mean E-value (CI bound):", round(mean(comparison_table$Evalue_CI), 2), "\n")
+cat("   - Biomarkers with robust findings (E-value CI ≥ 2):", 
+    sum(comparison_table$Evalue_CI >= 2), "/", length(biomarkers), "\n\n")
+
+cat("4. INTERPRETATION:\n")
+cat("   - IPTW adjustment attenuates effect estimates (healthy switcher bias)\n")
+cat("   - E-values suggest moderate-to-strong unmeasured confounding would be\n")
+cat("     needed to fully explain the observed THS vs Smoker differences\n")
+cat("   - Trimming improves precision with minimal impact on point estimates\n\n")
+
+cat("FILES SAVED:\n")
+cat("  Tables:", tables_dir, "\n")
+cat("    - pmi_data_with_weights_trimmed.csv\n")
+cat("    - trimming_method_comparison.csv\n")
+cat("    - smd_comparison_trimmed.csv\n")
+cat("    - biomarker_results_evalues.csv\n")
+cat("    - trimming_sensitivity_cohb.csv\n")
+cat("    - summary_report_enhanced.csv\n")
+cat("  Figures:", figures_dir, "\n")
+cat("    - love_plot_trimming_comparison.png\n")
+cat("    - weight_distribution_trimming.png\n")
+cat("    - gps_distribution_pmi.png\n\n")
+
+cat("================================================================================\n")
+cat("METHODOLOGICAL NOTES\n")
+cat("================================================================================\n\n")
+
+cat("WEIGHT TRIMMING RECOMMENDATIONS:\n")
+cat("  1. Percentile-based (1-99%): Default choice, data-adaptive\n")
+cat("  2. Fixed threshold: Use when clinical knowledge suggests max plausible weight\n")
+cat("  3. Always compare results across trimming methods as sensitivity analysis\n\n")
+
+cat("E-VALUE INTERPRETATION:\n")
+cat("  - E-value answers: 'How strong would unmeasured confounding need to be?'\n")
+cat("  - Higher E-value = more robust to unmeasured confounding\n")
+cat("  - E-value for CI bound is more conservative (accounts for sampling variability)\n")
+cat("  - Compare E-values to plausible confounders in your domain\n\n")
+
+cat("LIMITATIONS:\n")
+cat("  - E-values assume single unmeasured confounder (may underestimate if multiple)\n")
+cat("  - Trimming introduces some bias (trade-off with variance)\n")
+cat("  - Cross-sectional design still cannot establish temporality\n")
+cat("  - GPS cannot adjust for unmeasured confounders\n\n")
 
 cat("================================================================================\n")

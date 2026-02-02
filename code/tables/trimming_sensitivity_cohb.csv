@@ -1,0 +1,7 @@
+"Method","Weight_Var","THS_Diff","THS_SE","THS_p","ESS"
+"Unweighted",NA,-3.658,0.064,"<2e-16",888
+"IPTW Untrimmed","sw",-3.603,0.064,"<2e-16",667
+"IPTW Trim 1-99%","sw_trim_p99",-3.596,0.064,"<2e-16",690
+"IPTW Trim 5-95%","sw_trim_p95",-3.595,0.064,"<2e-16",738
+"IPTW Trim Max=10","sw_trim_f10",-3.603,0.064,"<2e-16",667
+"IPTW Trim Max=5","sw_trim_f5",-3.603,0.064,"<2e-16",669
