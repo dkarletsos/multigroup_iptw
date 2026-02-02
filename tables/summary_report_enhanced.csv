@@ -19,4 +19,4 @@
 "Mean E-value (Point)","4.04"
 "Mean E-value (CI)","3.56"
 "Min E-value (CI)","1.62"
-"Biomarkers with E-value CI ≥ 2","6"
+"Biomarkers with E-value CI >= 2","6"
