@@ -1,7 +1,7 @@
 ############################################################################
 # Inverse Probability Weighting for Product Switching Groups
 # ENHANCED VERSION: Weight Trimming + E-Value Sensitivity Analysis
-# Adapted for PMI Cross-Sectional Risk Marker Study (NCT05385055)
+# Adapted for Cross-Sectional Risk Marker Study Design
 # 3 Groups: Current Smokers, THS Users (Switchers), Former Smokers
 #
 # Author: [Your Name]
@@ -40,7 +40,7 @@ rm(list = ls())
 # Expected folder structure:
 #   project/
 #   ├── code/
-#   │   └── iptw_pmi_switching_enhanced.R  (this script)
+#   │   └── iptw_switching_enhanced.R  (this script)
 #   ├── figures/
 #   │   └── [output plots]
 #   └── tables/
@@ -105,7 +105,7 @@ set.seed(20250202)
 
 cat("\n")
 cat("================================================================================\n")
-cat("IPTW FOR PRODUCT SWITCHING: PMI THS STUDY ADAPTATION\n")
+cat("IPTW FOR PRODUCT SWITCHING STUDY\n")
 cat("ENHANCED: Weight Trimming + E-Value Sensitivity Analysis\n")
 cat("3 Groups: Current Smokers | THS Users (Switchers) | Former Smokers\n")
 cat("================================================================================\n\n")
@@ -146,7 +146,6 @@ cat("===========================================================================
 #' calculate_evalue_rr(2.5)  # RR = 2.5
 #' calculate_evalue_rr(0.5, 0.3, 0.8)  # RR = 0.5 with 95% CI
 calculate_evalue_rr <- function(rr, lo = NULL, hi = NULL) {
-  
 
   # For RR < 1, take reciprocal (E-values are symmetric)
   if (rr < 1) {
@@ -257,10 +256,10 @@ calculate_evalue_continuous <- function(diff, se, pooled_sd) {
 }
 
 ############################################################################
-# PART 1: DATA GENERATION - PMI STUDY STRUCTURE
+# PART 1: DATA GENERATION - STUDY STRUCTURE
 ############################################################################
-# This section generates simulated data that mimics the PMI Cross-Sectional
-# Risk Marker Study (NCT05385055).
+# This section generates simulated data that mimics a Cross-Sectional
+# Risk Marker Study design.
 #
 # KEY DESIGN FEATURES:
 # - 3 product groups with systematic differences (simulating selection bias)
@@ -274,12 +273,12 @@ calculate_evalue_continuous <- function(diff, se, pooled_sd) {
 ############################################################################
 
 cat("================================================================================\n")
-cat("PART 1: GENERATING SIMULATED DATA (PMI STUDY STRUCTURE)\n")
+cat("PART 1: GENERATING SIMULATED DATA (CROSS-SECTIONAL STUDY STRUCTURE)\n")
 cat("================================================================================\n\n")
 
-#' Generate Simulated PMI Study Data
+#' Generate Simulated Study Data
 #' 
-#' Creates a dataset mimicking the PMI Cross-Sectional Risk Marker Study
+#' Creates a dataset mimicking a Cross-Sectional Risk Marker Study
 #' with realistic confounding structure and known causal effects.
 #' 
 #' Groups:
@@ -305,9 +304,9 @@ cat("===========================================================================
 #'   - Central AIx: Arterial stiffness
 #'   - FEV1 %: Lung function (higher is better)
 #' 
-#' @param n_per_group Sample size per group (default 296, matching PMI study)
+#' @param n_per_group Sample size per group (default 296)
 #' @return Data frame with patient_id, product_group, covariates, and outcomes
-generate_pmi_data <- function(n_per_group = 296) {
+generate_study_data <- function(n_per_group = 296) {
   
   # GROUP-SPECIFIC PARAMETERS
   # These simulate the selection process into each group
@@ -468,18 +467,18 @@ generate_pmi_data <- function(n_per_group = 296) {
   }
   
   # Combine all groups
-  pmi_data <- bind_rows(data_list)
-  return(pmi_data)
+  study_data <- bind_rows(data_list)
+  return(study_data)
 }
 
 # Generate the dataset
-pmi_data <- generate_pmi_data(n_per_group = 296)
+study_data <- generate_study_data(n_per_group = 296)
 
-cat("Data Generated (PMI Study Structure)\n")
-cat("Total sample size:", nrow(pmi_data), "\n")
-cat("Number of groups:", length(unique(pmi_data$product_group)), "\n\n")
+cat("Data Generated (Cross-Sectional Study Structure)\n")
+cat("Total sample size:", nrow(study_data), "\n")
+cat("Number of groups:", length(unique(study_data$product_group)), "\n\n")
 cat("Sample size per group:\n")
-print(table(pmi_data$product_group))
+print(table(study_data$product_group))
 cat("\n")
 
 ############################################################################
@@ -592,7 +591,7 @@ cat("PRE-WEIGHTING STANDARDIZED MEAN DIFFERENCES:\n\n")
 pre_weight_smds <- list()
 
 for (var in covariates) {
-  smd_results <- calculate_smd(pmi_data, var, "product_group")
+  smd_results <- calculate_smd(study_data, var, "product_group")
   pre_weight_smds[[var]] <- smd_results
   
   cat(paste0("Variable: ", toupper(var), "\n"))
@@ -602,7 +601,7 @@ for (var in covariates) {
 
 # Baseline characteristics table
 cat("BASELINE CHARACTERISTICS BY PRODUCT GROUP (UNWEIGHTED):\n\n")
-baseline_summary <- pmi_data %>%
+baseline_summary <- study_data %>%
   group_by(product_group) %>%
   summarise(
     N = n(),
@@ -633,7 +632,7 @@ cat("\n")
 #
 # where k_i is the observed group for individual i.
 #
-# Interpretation in PMI context:
+# Interpretation in this context:
 #   GPS represents: "Given a participant's covariates, how predictable
 #   is their decision to continue smoking, switch to THS, or quit?"
 ############################################################################
@@ -649,7 +648,7 @@ cat("Model: P(Group | X) where X = age, female, europe, pack_years, cpd_history\
 # Reference group: current_smoker (first level)
 gps_model <- multinom(
   product_group ~ age + female + europe + pack_years + cpd_history, 
-  data = pmi_data, 
+  data = study_data, 
   trace = FALSE  # Suppress iteration output
 )
 
@@ -663,18 +662,18 @@ gps_matrix <- predict(gps_model, type = "probs")
 
 # Extract GPS for each individual's OBSERVED group
 # GPS_i = P(Group = observed_group_i | X_i)
-pmi_data$gps <- sapply(1:nrow(pmi_data), function(i) {
-  group_idx <- as.numeric(pmi_data$product_group[i])
+study_data$gps <- sapply(1:nrow(study_data), function(i) {
+  group_idx <- as.numeric(study_data$product_group[i])
   gps_matrix[i, group_idx]
 })
 
 cat("GENERALIZED PROPENSITY SCORE DIAGNOSTICS:\n\n")
 cat("GPS summary (all observations):\n")
-print(summary(pmi_data$gps))
+print(summary(study_data$gps))
 cat("\n")
 
 cat("GPS by product group:\n")
-gps_by_group <- pmi_data %>% 
+gps_by_group <- study_data %>% 
   group_by(product_group) %>% 
   summarise(
     Mean_GPS = round(mean(gps), 3),
@@ -688,10 +687,10 @@ cat("\n")
 
 # Check for positivity violations
 cat("POSITIVITY CHECK:\n")
-cat("  Observations with GPS < 0.05:", sum(pmi_data$gps < 0.05), 
-    "(", round(100 * mean(pmi_data$gps < 0.05), 1), "%)\n")
-cat("  Observations with GPS < 0.10:", sum(pmi_data$gps < 0.10), 
-    "(", round(100 * mean(pmi_data$gps < 0.10), 1), "%)\n\n")
+cat("  Observations with GPS < 0.05:", sum(study_data$gps < 0.05), 
+    "(", round(100 * mean(study_data$gps < 0.05), 1), "%)\n")
+cat("  Observations with GPS < 0.10:", sum(study_data$gps < 0.10), 
+    "(", round(100 * mean(study_data$gps < 0.10), 1), "%)\n\n")
 
 ############################################################################
 # PART 4: CALCULATE IPTW WEIGHTS WITH TRIMMING OPTIONS
@@ -722,7 +721,7 @@ cat("PART 4: CALCULATING IPTW WEIGHTS WITH TRIMMING\n")
 cat("================================================================================\n\n")
 
 # Calculate marginal probabilities P(Group = k)
-marginal_probs <- pmi_data %>%
+marginal_probs <- study_data %>%
   group_by(product_group) %>%
   summarise(n = n(), .groups = 'drop') %>%
   mutate(marginal_prob = n / sum(n))
@@ -732,20 +731,20 @@ print(as.data.frame(marginal_probs))
 cat("\n")
 
 # Add marginal probabilities to data
-pmi_data <- pmi_data %>%
+study_data <- study_data %>%
   left_join(marginal_probs %>% select(product_group, marginal_prob), 
             by = "product_group")
 
 # Calculate weights
-pmi_data$uw <- 1 / pmi_data$gps                           # Unstabilized
-pmi_data$sw <- pmi_data$marginal_prob / pmi_data$gps      # Stabilized
+study_data$uw <- 1 / study_data$gps                           # Unstabilized
+study_data$sw <- study_data$marginal_prob / study_data$gps      # Stabilized
 
 cat("UNTRIMMED WEIGHT DIAGNOSTICS:\n\n")
 cat("Unstabilized weights:\n")
-print(summary(pmi_data$uw))
+print(summary(study_data$uw))
 cat("\n")
 cat("Stabilized weights:\n")
-print(summary(pmi_data$sw))
+print(summary(study_data$sw))
 cat("\n")
 
 ############################################################################
@@ -804,19 +803,19 @@ trim_gps_percentile <- function(data, lower = 0.01, upper = 0.99) {
 cat("Applying trimming strategies...\n\n")
 
 # 1. Percentile trimming on weights (1st-99th) - RECOMMENDED DEFAULT
-pmi_data$sw_trim_p99 <- trim_percentile(pmi_data$sw, 0.01, 0.99)
+study_data$sw_trim_p99 <- trim_percentile(study_data$sw, 0.01, 0.99)
 
 # 2. Percentile trimming on weights (5th-95th) - More aggressive
-pmi_data$sw_trim_p95 <- trim_percentile(pmi_data$sw, 0.05, 0.95)
+study_data$sw_trim_p95 <- trim_percentile(study_data$sw, 0.05, 0.95)
 
 # 3. Fixed threshold (max = 10)
-pmi_data$sw_trim_f10 <- trim_fixed(pmi_data$sw, 10)
+study_data$sw_trim_f10 <- trim_fixed(study_data$sw, 10)
 
 # 4. Fixed threshold (max = 5) - More aggressive
-pmi_data$sw_trim_f5 <- trim_fixed(pmi_data$sw, 5)
+study_data$sw_trim_f5 <- trim_fixed(study_data$sw, 5)
 
 # 5. GPS percentile trimming
-pmi_data <- trim_gps_percentile(pmi_data, 0.01, 0.99)
+study_data <- trim_gps_percentile(study_data, 0.01, 0.99)
 
 # Compare trimming methods
 trimming_comparison <- data.frame(
@@ -829,14 +828,14 @@ trimming_comparison <- data.frame(
 
 # Calculate summary statistics for each method
 for (i in 1:nrow(trimming_comparison)) {
-  w <- pmi_data[[trimming_comparison$Weight_Var[i]]]
+  w <- study_data[[trimming_comparison$Weight_Var[i]]]
   trimming_comparison$Min[i] <- round(min(w), 3)
   trimming_comparison$Max[i] <- round(max(w), 3)
   trimming_comparison$Mean[i] <- round(mean(w), 3)
   trimming_comparison$SD[i] <- round(sd(w), 3)
   # ESS = (Sum w)^2 / Sum(w^2)
   trimming_comparison$ESS[i] <- round(sum(w)^2 / sum(w^2), 0)
-  trimming_comparison$ESS_pct[i] <- round(100 * sum(w)^2 / sum(w^2) / nrow(pmi_data), 1)
+  trimming_comparison$ESS_pct[i] <- round(100 * sum(w)^2 / sum(w^2) / nrow(study_data), 1)
 }
 
 cat("TRIMMING METHOD COMPARISON:\n\n")
@@ -844,11 +843,11 @@ print(trimming_comparison[, c("Method", "Min", "Max", "Mean", "SD", "ESS", "ESS_
 cat("\n")
 
 # Select primary trimmed weights (percentile 1-99%)
-pmi_data$sw_trimmed <- pmi_data$sw_trim_p99
+study_data$sw_trimmed <- study_data$sw_trim_p99
 
 cat("PRIMARY TRIMMING METHOD: Percentile 1-99%\n")
 cat("Rationale: Balances bias-variance tradeoff; commonly recommended in literature\n")
-cat("Reference: Cole & Hernán (2008) Am J Epidemiol\n\n")
+cat("Reference: Cole & Hernan (2008) Am J Epidemiol\n\n")
 
 ############################################################################
 # PART 5: POST-WEIGHTING BALANCE (TRIMMED vs UNTRIMMED)
@@ -863,8 +862,8 @@ post_weight_smds_untrimmed <- list()
 post_weight_smds_trimmed <- list()
 
 for (var in covariates) {
-  post_weight_smds_untrimmed[[var]] <- calculate_weighted_smd(pmi_data, var, "product_group", "sw")
-  post_weight_smds_trimmed[[var]] <- calculate_weighted_smd(pmi_data, var, "product_group", "sw_trimmed")
+  post_weight_smds_untrimmed[[var]] <- calculate_weighted_smd(study_data, var, "product_group", "sw")
+  post_weight_smds_trimmed[[var]] <- calculate_weighted_smd(study_data, var, "product_group", "sw_trimmed")
 }
 
 # Create comparison table
@@ -961,7 +960,7 @@ cat("Love plot saved:", file.path(figures_dir, "love_plot_trimming_comparison.pn
 # Shows distribution of IPTW weights by group
 # Red dashed line at Weight = 1 indicates "no adjustment" reference
 
-weight_plot_data <- pmi_data %>%
+weight_plot_data <- study_data %>%
   select(product_group, sw, sw_trimmed) %>%
   pivot_longer(cols = c(sw, sw_trimmed),
                names_to = "Weight_Type",
@@ -1000,7 +999,7 @@ cat("Weight distribution plot saved:", file.path(figures_dir, "weight_distributi
 # Shows distribution of propensity scores by group
 # Interpretation: Higher GPS = more "predictable" group membership
 
-p3 <- ggplot(pmi_data, aes(x = gps, fill = product_group)) +
+p3 <- ggplot(study_data, aes(x = gps, fill = product_group)) +
   geom_density(alpha = 0.5) +
   scale_fill_manual(values = c("current_smoker" = "#E41A1C", 
                                 "ths_user" = "#377EB8", 
@@ -1020,8 +1019,8 @@ p3 <- ggplot(pmi_data, aes(x = gps, fill = product_group)) +
     plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray30")
   )
 
-ggsave(file.path(figures_dir, "gps_distribution_pmi.png"), p3, width = 10, height = 6, dpi = 300)
-cat("GPS distribution plot saved:", file.path(figures_dir, "gps_distribution_pmi.png"), "\n\n")
+ggsave(file.path(figures_dir, "gps_distribution.png"), p3, width = 10, height = 6, dpi = 300)
+cat("GPS distribution plot saved:", file.path(figures_dir, "gps_distribution.png"), "\n\n")
 
 ############################################################################
 # PART 7: OUTCOME ANALYSIS WITH SENSITIVITY ANALYSIS
@@ -1114,12 +1113,12 @@ results_list <- list()
 
 for (bm in biomarkers) {
   # Unweighted analysis
-  res_unweighted <- analyze_biomarker_full(pmi_data, bm, NULL)
+  res_unweighted <- analyze_biomarker_full(study_data, bm, NULL)
   res_unweighted$Biomarker <- biomarker_labels[bm]
   res_unweighted$Method <- "Unweighted"
   
   # IPTW analysis (trimmed weights)
-  res_iptw_trim <- analyze_biomarker_full(pmi_data, bm, "sw_trimmed")
+  res_iptw_trim <- analyze_biomarker_full(study_data, bm, "sw_trimmed")
   res_iptw_trim$Biomarker <- biomarker_labels[bm]
   res_iptw_trim$Method <- "IPTW_Trimmed"
   
@@ -1216,10 +1215,10 @@ trimming_sensitivity <- data.frame(
 
 for (i in 1:nrow(trimming_sensitivity)) {
   if (is.na(trimming_sensitivity$Weight_Var[i])) {
-    model <- lm(cohb ~ product_group, data = pmi_data)
+    model <- lm(cohb ~ product_group, data = study_data)
   } else {
-    model <- lm(cohb ~ product_group, data = pmi_data, 
-                weights = pmi_data[[trimming_sensitivity$Weight_Var[i]]])
+    model <- lm(cohb ~ product_group, data = study_data, 
+                weights = study_data[[trimming_sensitivity$Weight_Var[i]]])
   }
   
   coefs <- summary(model)$coefficients
@@ -1229,10 +1228,10 @@ for (i in 1:nrow(trimming_sensitivity)) {
   
   # Calculate ESS
   if (!is.na(trimming_sensitivity$Weight_Var[i])) {
-    w <- pmi_data[[trimming_sensitivity$Weight_Var[i]]]
+    w <- study_data[[trimming_sensitivity$Weight_Var[i]]]
     trimming_sensitivity$ESS[i] <- round(sum(w)^2 / sum(w^2), 0)
   } else {
-    trimming_sensitivity$ESS[i] <- nrow(pmi_data)
+    trimming_sensitivity$ESS[i] <- nrow(study_data)
   }
 }
 
@@ -1254,8 +1253,8 @@ cat("PART 9: SAVING RESULTS\n")
 cat("================================================================================\n\n")
 
 # Save processed dataset with all weights
-write.csv(pmi_data, file.path(tables_dir, "pmi_data_with_weights_trimmed.csv"), row.names = FALSE)
-cat("Data saved:", file.path(tables_dir, "pmi_data_with_weights_trimmed.csv"), "\n")
+write.csv(study_data, file.path(tables_dir, "study_data_with_weights_trimmed.csv"), row.names = FALSE)
+cat("Data saved:", file.path(tables_dir, "study_data_with_weights_trimmed.csv"), "\n")
 
 # Save trimming comparison
 write.csv(trimming_comparison, file.path(tables_dir, "trimming_method_comparison.csv"), row.names = FALSE)
@@ -1274,7 +1273,7 @@ write.csv(trimming_sensitivity, file.path(tables_dir, "trimming_sensitivity_cohb
 cat("Trimming sensitivity saved:", file.path(tables_dir, "trimming_sensitivity_cohb.csv"), "\n")
 
 # Create comprehensive summary report
-ess_trimmed <- sum(pmi_data$sw_trimmed)^2 / sum(pmi_data$sw_trimmed^2)
+ess_trimmed <- sum(study_data$sw_trimmed)^2 / sum(study_data$sw_trimmed^2)
 
 summary_report <- data.frame(
   Metric = c(
@@ -1301,18 +1300,18 @@ summary_report <- data.frame(
     "Biomarkers with E-value CI >= 2"
   ),
   Value = c(
-    nrow(pmi_data),
+    nrow(study_data),
     296,
     3,
     length(covariates),
     "",
-    round(sum(pmi_data$sw)^2 / sum(pmi_data$sw^2), 0),
-    round(100 * sum(pmi_data$sw)^2 / sum(pmi_data$sw^2) / nrow(pmi_data), 1),
-    round(max(pmi_data$sw), 2),
+    round(sum(study_data$sw)^2 / sum(study_data$sw^2), 0),
+    round(100 * sum(study_data$sw)^2 / sum(study_data$sw^2) / nrow(study_data), 1),
+    round(max(study_data$sw), 2),
     "",
     round(ess_trimmed, 0),
-    round(100 * ess_trimmed / nrow(pmi_data), 1),
-    round(max(pmi_data$sw_trimmed), 2),
+    round(100 * ess_trimmed / nrow(study_data), 1),
+    round(max(study_data$sw_trimmed), 2),
     "",
     round(max(abs(smd_comparison$SMD_Pre)), 3),
     round(max(abs(smd_comparison$SMD_Post_Untrimmed)), 3),
@@ -1339,9 +1338,9 @@ cat("===========================================================================
 cat("KEY FINDINGS:\n\n")
 
 cat("1. WEIGHT TRIMMING:\n")
-cat("   - Untrimmed max weight:", round(max(pmi_data$sw), 2), "\n")
-cat("   - Trimmed (1-99%) max weight:", round(max(pmi_data$sw_trimmed), 2), "\n")
-cat("   - ESS improved from", round(sum(pmi_data$sw)^2 / sum(pmi_data$sw^2), 0), 
+cat("   - Untrimmed max weight:", round(max(study_data$sw), 2), "\n")
+cat("   - Trimmed (1-99%) max weight:", round(max(study_data$sw_trimmed), 2), "\n")
+cat("   - ESS improved from", round(sum(study_data$sw)^2 / sum(study_data$sw^2), 0), 
     "to", round(ess_trimmed, 0), "with trimming\n\n")
 
 cat("2. COVARIATE BALANCE:\n")
@@ -1362,7 +1361,7 @@ cat("   - Trimming improves precision with minimal impact on point estimates\n\n
 
 cat("FILES SAVED:\n")
 cat("  Tables:", tables_dir, "\n")
-cat("    - pmi_data_with_weights_trimmed.csv\n")
+cat("    - study_data_with_weights_trimmed.csv\n")
 cat("    - trimming_method_comparison.csv\n")
 cat("    - smd_comparison_trimmed.csv\n")
 cat("    - biomarker_results_evalues.csv\n")
@@ -1371,7 +1370,7 @@ cat("    - summary_report_enhanced.csv\n")
 cat("  Figures:", figures_dir, "\n")
 cat("    - love_plot_trimming_comparison.png\n")
 cat("    - weight_distribution_trimming.png\n")
-cat("    - gps_distribution_pmi.png\n\n")
+cat("    - gps_distribution.png\n\n")
 
 cat("================================================================================\n")
 cat("RED DASHED LINE INTERPRETATION GUIDE\n")
