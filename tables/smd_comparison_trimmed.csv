@@ -1,0 +1,16 @@
+"Variable","Comparison","SMD_Pre","SMD_Post_Untrimmed","SMD_Post_Trimmed"
+"age","current smoker vs ths user",0.609,0.145,0.146
+"age","current smoker vs former smoker",0.301,0,0.007
+"age","ths user vs former smoker",-0.285,-0.144,-0.137
+"female","current smoker vs ths user",-0.176,0.025,0.019
+"female","current smoker vs former smoker",-0.02,-0.007,-0.005
+"female","ths user vs former smoker",0.156,-0.032,-0.024
+"europe","current smoker vs ths user",0.156,-0.019,-0.015
+"europe","current smoker vs former smoker",0.183,-0.016,-0.001
+"europe","ths user vs former smoker",0.027,0.003,0.014
+"pack_years","current smoker vs ths user",0.787,0.099,0.12
+"pack_years","current smoker vs former smoker",0.858,-0.031,0.004
+"pack_years","ths user vs former smoker",0.145,-0.128,-0.111
+"cpd_history","current smoker vs ths user",0.419,-0.021,-0.003
+"cpd_history","current smoker vs former smoker",0.625,-0.053,-0.017
+"cpd_history","ths user vs former smoker",0.227,-0.036,-0.015
